@@ -12,6 +12,7 @@ public class PoiEnrichmentCandidate {
     private UUID id;
     private String nameTr;
     private String nameEn;
+    private String wikidataId;
     private String category;
     private short completenessScore;
     private Map<String, Object> attributes;
