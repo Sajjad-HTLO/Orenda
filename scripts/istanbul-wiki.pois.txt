@@ -1,0 +1,11 @@
+# 1. Allow 'P' osm_type (done already)
+docker exec aitp-pg psql -U postgres -d aitp -c "
+ALTER TABLE poi DROP CONSTRAINT IF EXISTS poi_osm_type_check;
+ALTER TABLE poi ADD CONSTRAINT poi_osm_type_check CHECK (osm_type IN ('N','W','R','Q','G','P'));"
+
+# 2. Run the full import
+python3 scripts/import_istanbul_wiki_pois.py
+
+# 3. Verify
+docker exec aitp-pg psql -U postgres -d aitp -c "
+SELECT osm_type, COUNT(*) FROM poi GROUP BY osm_type ORDER BY count DESC;"
