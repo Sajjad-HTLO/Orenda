@@ -5,7 +5,6 @@ import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
-import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitUntilState;
 import com.sajad.AITP.tripadvisor.config.TripadvisorCrawlerProperties;
 import com.sajad.AITP.tripadvisor.model.CrawlPage;
@@ -24,15 +23,23 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+
+import com.microsoft.playwright.*;
+
+import java.util.*;
 
 @Slf4j
 @Component
 @ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class ListingWorker {
+
+    private static final String TRIPADVISOR_HOMEPAGE = "https://www.tripadvisor.com/";
+    private static final String HOTEL_LINK_MARKER = "Hotel_Review-";
+    private static final String DATADOME_MARKER = "captcha-delivery.com";
+    private static final String DATADOME_CHALLENGE_TITLE = "tripadvisor.com";
 
     private final TripadvisorCrawlerProperties properties;
     private final ListingParser listingParser;
@@ -73,127 +80,476 @@ public class ListingWorker {
                     "Ignoring persisted offsets and disabling poi/progress writes for extraction verification");
         }
 
-        // Retry up to 3 times with fresh profiles when DataDome blocks us
-        int maxRetries = 3;
-        for (int attempt = 1; attempt <= maxRetries; attempt++) {
-            Path userDataDir = ensureUserDataDir(attempt);
-            String chromePath = resolveChromeExecutable();
-            boolean headed = !properties.headless();
-            logProgress("BROWSER_OPEN", crawlPage, startedAt,
-                    "Opening Chrome. attempt=%d/%d headed=%s chromePath=%s userDataDir=%s"
-                            .formatted(attempt, maxRetries, headed, chromePath, userDataDir));
+        Path userDataDir = ensureUserDataDir();
+        String chromePath = resolveChromeExecutable();
+        logProgress("BROWSER_OPEN", crawlPage, startedAt,
+                "Opening system Google Chrome with persistent profile. headless=%s timeoutMs=%d chromePath=%s userDataDir=%s"
+                        .formatted(properties.headless(), properties.navigationTimeoutMs(), chromePath, userDataDir));
 
-            java.util.List<String> launchArgs = new java.util.ArrayList<>(antiDetectionArgs(headed));
-            BrowserType.LaunchPersistentContextOptions launchOptions =
-                    new BrowserType.LaunchPersistentContextOptions()
-                            .setHeadless(!headed)
-                            .setArgs(launchArgs)
-                            .setUserAgent(properties.userAgent())
-                            .setLocale("en-US")
-                            .setTimezoneId("Europe/Istanbul")
-                            .setViewportSize(1366, 768)
-                            .setExtraHTTPHeaders(MapUtils.headers());
-            if (chromePath != null) {
-                launchOptions.setExecutablePath(Path.of(chromePath));
+        // Minimal launch args — real Chrome doesn't launch with 20 flags
+        java.util.List<String> launchArgs = new java.util.ArrayList<>(minimalChromeArgs());
+        if (properties.headless()) {
+            launchArgs.add("");
+        }
+
+        BrowserType.LaunchPersistentContextOptions launchOptions =
+                new BrowserType.LaunchPersistentContextOptions()
+                        .setHeadless(false) // never use old headless; we control via args
+                        .setArgs(launchArgs)
+                        .setUserAgent(properties.userAgent())
+                        .setLocale("en-US")
+                        .setTimezoneId("Europe/Istanbul")
+                        .setViewportSize(1366, 768)
+                        .setExtraHTTPHeaders(browserHeaders());
+        if (chromePath != null) {
+            launchOptions.setExecutablePath(Path.of(chromePath));
+        }
+
+        try (Playwright playwright = Playwright.create();
+             BrowserContext context = playwright.chromium().launchPersistentContext(
+                     userDataDir, launchOptions)) {
+
+            Page page = context.pages().isEmpty() ? context.newPage() : context.pages().get(0);
+            page.setDefaultNavigationTimeout(properties.navigationTimeoutMs());
+            injectStealthScripts(page);
+
+            // === STEP 1: Homepage warmup — establish DataDome cookies ===
+            // The first request to any DataDome-protected page always gets challenged.
+            // By visiting the homepage first, we let the challenge auto-resolve and
+            // obtain the datadome cookie, which is then sent on subsequent requests.
+            logProgress("WARMUP_START", crawlPage, startedAt,
+                    "Visiting Tripadvisor homepage for DataDome cookie warming");
+            page.navigate(TRIPADVISOR_HOMEPAGE, new Page.NavigateOptions()
+                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(properties.navigationTimeoutMs()));
+
+            boolean warmupOk = waitForRealContent(page, crawlPage, startedAt, "WARMUP");
+            if (warmupOk) {
+                // Check if datadome cookie was set
+                boolean hasDataDomeCookie = context.cookies().stream()
+                        .anyMatch(cookie -> "datadome".equals(cookie.name));
+                logProgress("WARMUP_DONE", crawlPage, startedAt,
+                        "Homepage loaded. datadomeCookiePresent=%b".formatted(hasDataDomeCookie));
+                performHumanBehavior(page);
+            } else {
+                logProgress("WARMUP_WARNING", crawlPage, startedAt,
+                        "Homepage warmup may not have fully resolved, proceeding anyway");
             }
-            try (Playwright playwright = Playwright.create();
-                 BrowserContext context = playwright.chromium().launchPersistentContext(
-                         userDataDir, launchOptions)) {
+            randomDelay.pause();
+
+            // === STEP 2: Navigate to the target listing page ===
+            logProgress("NAVIGATE_START", crawlPage, startedAt, "Navigating to Tripadvisor listing page");
+            page.navigate(crawlPage.url(), new Page.NavigateOptions()
+                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(properties.navigationTimeoutMs()));
+
+            // === STEP 3: Wait for DataDome challenge to resolve and real content to appear ===
+            // DataDome serves a JS challenge page that auto-fingerprints the browser,
+            // submits results, receives a cookie, and reloads the page. We must WAIT
+            // for this process to complete before extracting HTML.
+            logProgress("WAIT_CONTENT", crawlPage, startedAt,
+                    "Waiting for page content (handling DataDome challenge if present)");
+            boolean contentReady = waitForRealContent(page, crawlPage, startedAt, "LISTING");
+
+            // === STEP 3b: Retry with reload if blocked ===
+            if (!contentReady) {
+                logProgress("RETRY_RELOAD", crawlPage, startedAt,
+                        "Content not found, reloading page (retry 1)");
                 randomDelay.pause();
-                Page page = context.pages().isEmpty() ? context.newPage() : context.pages().get(0);
-                page.setDefaultNavigationTimeout(properties.navigationTimeoutMs());
-                injectStealthScripts(page);
-
-                logProgress("NAVIGATE_START", crawlPage, startedAt, "Navigating to Tripadvisor listing page");
-                page.navigate(crawlPage.url(), new Page.NavigateOptions()
-                        .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
-                        .setTimeout(properties.navigationTimeoutMs()));
-                logProgress("DOM_READY", crawlPage, startedAt, "DOMContentLoaded reached");
-
                 try {
-                    page.waitForLoadState(LoadState.NETWORKIDLE, new Page.WaitForLoadStateOptions()
-                            .setTimeout(Math.min(properties.navigationTimeoutMs(), 15000)));
-                    logProgress("NETWORK_IDLE", crawlPage, startedAt, "Network idle reached");
+                    page.reload(new Page.ReloadOptions()
+                            .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                            .setTimeout(properties.navigationTimeoutMs()));
                 } catch (Exception e) {
-                    log.warn("TRIPADVISOR_PROGRESS step=NETWORK_IDLE_TIMEOUT offset={} url={} elapsedMs={} warning={}",
-                            crawlPage.offset(), crawlPage.url(), elapsedMs(startedAt), e.getMessage());
+                    log.debug("Reload failed: {}", e.getMessage());
                 }
+                contentReady = waitForRealContent(page, crawlPage, startedAt, "RETRY1");
+            }
 
-                String html = page.content();
-                String title = page.title();
-                int htmlChars = html == null ? 0 : html.length();
-                int htmlBytes = byteSize(html);
-                String htmlSha256 = sha256(html);
-                int hotelReviewOccurrences = countOccurrences(html, "Hotel_Review-");
-                int captchaOccurrences = countOccurrencesIgnoreCase(html, "captcha");
-                int accessDeniedOccurrences = countOccurrencesIgnoreCase(html, "access denied");
-                int securityCheckOccurrences = countOccurrencesIgnoreCase(html, "security check");
-                int botOccurrences = countOccurrencesIgnoreCase(html, "bot");
-                boolean isDataDome = isDataDomeBlock(html);
-                String htmlSnapshotPath = saveHtmlSnapshot(crawlPage, html);
-                String htmlPreview = preview(html, 600);
-                log.info("TRIPADVISOR_FETCHED_DATA url={} offset={} title='{}' htmlChars={} htmlBytes={} htmlSha256={} hotelReviewOccurrences={} captchaOccurrences={} accessDeniedOccurrences={} securityCheckOccurrences={} botOccurrences={} isDataDome={} snapshotPath={} elapsedMs={}",
-                        crawlPage.url(), crawlPage.offset(), title, htmlChars, htmlBytes, htmlSha256, hotelReviewOccurrences,
-                        captchaOccurrences, accessDeniedOccurrences, securityCheckOccurrences, botOccurrences, isDataDome, htmlSnapshotPath, elapsedMs(startedAt));
-                log.info("TRIPADVISOR_HTML_PREVIEW url={} offset={} preview={}", crawlPage.url(), crawlPage.offset(), htmlPreview);
-
-                if (isDataDome && attempt < maxRetries) {
-                    log.warn("TRIPADVISOR_DATADOME_BLOCKED attempt={}/{} url={} offset={} — DataDome CAPTCHA detected. "
-                            + "Deleting contaminated profile and retrying with fresh browser state...",
-                            attempt, maxRetries, crawlPage.url(), crawlPage.offset());
-                    deleteUserDataDir(userDataDir);
-                    randomDelay.pauseLonger();
-                    continue;
+            // === STEP 3c: Full retry — re-warmup then re-navigate ===
+            if (!contentReady) {
+                logProgress("RETRY_FULL", crawlPage, startedAt,
+                        "Content still not found, doing full re-warmup + re-navigate (retry 2)");
+                randomDelay.pause();
+                try {
+                    page.navigate(TRIPADVISOR_HOMEPAGE, new Page.NavigateOptions()
+                            .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                            .setTimeout(properties.navigationTimeoutMs()));
+                    waitForRealContent(page, crawlPage, startedAt, "RETRY_WARMUP");
+                    performHumanBehavior(page);
+                    randomDelay.pause();
+                    page.navigate(crawlPage.url(), new Page.NavigateOptions()
+                            .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                            .setTimeout(properties.navigationTimeoutMs()));
+                    contentReady = waitForRealContent(page, crawlPage, startedAt, "RETRY2");
+                } catch (Exception e) {
+                    log.debug("Full retry navigation failed: {}", e.getMessage());
                 }
+            }
 
-                ListingParseResult parseResult = listingParser.parse(html, crawlPage.url());
-                String hotelsJson = serializeHotels(parseResult.hotels());
-                int jsonChars = hotelsJson.length();
-                int jsonBytes = byteSize(hotelsJson);
+            // === STEP 4: Human-like behavior before extraction ===
+            performHumanBehavior(page);
 
-                log.info("TRIPADVISOR_EXTRACTION_SUMMARY url={} offset={} hotelCount={} htmlBytes={} jsonChars={} jsonBytes={} hotelReviewOccurrences={} snapshotPath={} elapsedMs={}",
-                        crawlPage.url(), crawlPage.offset(), parseResult.hotelCount(), htmlBytes, jsonChars, jsonBytes,
-                        hotelReviewOccurrences, htmlSnapshotPath, elapsedMs(startedAt));
-                if (parseResult.hotelCount() == 0) {
-                    log.warn("TRIPADVISOR_ZERO_EXTRACTION_DIAGNOSTIC url={} offset={} reason='Rendered HTML contained no parseable Hotel_Review links' htmlBytes={} hotelReviewOccurrences={} title='{}' snapshotPath={} htmlPreview={}",
-                            crawlPage.url(), crawlPage.offset(), htmlBytes, hotelReviewOccurrences, title, htmlSnapshotPath, htmlPreview);
-                }
-                logHotelSummary(parseResult.hotels());
-                log.info("TRIPADVISOR_EXTRACTED_HOTELS_JSON url={} offset={} hotelCount={} jsonBytes={} hotelsJson={}",
-                        crawlPage.url(), crawlPage.offset(), parseResult.hotelCount(), jsonBytes, hotelsJson);
+            // Give SPA a moment to render hotel cards via JavaScript
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
 
-                int persistedRows = 0;
+            // === STEP 5: Extract HTML ===
+            String html = page.content();
+            String title = page.title();
+            int htmlChars = html == null ? 0 : html.length();
+            int htmlBytes = byteSize(html);
+            String htmlSha256 = sha256(html);
+            int hotelReviewOccurrences = countOccurrences(html, HOTEL_LINK_MARKER);
+            int captchaOccurrences = countOccurrencesIgnoreCase(html, "captcha");
+            int accessDeniedOccurrences = countOccurrencesIgnoreCase(html, "access denied");
+            int securityCheckOccurrences = countOccurrencesIgnoreCase(html, "security check");
+            int botOccurrences = countOccurrencesIgnoreCase(html, "bot");
+            String htmlSnapshotPath = saveHtmlSnapshot(crawlPage, html);
+            String htmlPreview = preview(html, 600);
+
+            boolean stillBlocked = isDataDomeChallenge(html, title);
+
+            log.info("TRIPADVISOR_FETCHED_DATA url={} offset={} title='{}' htmlChars={} htmlBytes={} htmlSha256={} hotelReviewOccurrences={} captchaOccurrences={} accessDeniedOccurrences={} securityCheckOccurrences={} botOccurrences={} stillBlocked={} snapshotPath={} elapsedMs={}",
+                    crawlPage.url(), crawlPage.offset(), title, htmlChars, htmlBytes, htmlSha256, hotelReviewOccurrences,
+                    captchaOccurrences, accessDeniedOccurrences, securityCheckOccurrences, botOccurrences, stillBlocked, htmlSnapshotPath, elapsedMs(startedAt));
+            log.info("TRIPADVISOR_HTML_PREVIEW url={} offset={} preview={}", crawlPage.url(), crawlPage.offset(), htmlPreview);
+
+            // If still blocked after all retries, fail with a clear error
+            if (stillBlocked) {
+                log.error("TRIPADVISOR_BLOCKED url={} offset={} reason='DataDome challenge could not be resolved after all retries. Consider: (1) running headed mode, (2) using residential proxy, (3) increasing delays.' elapsedMs={}",
+                        crawlPage.url(), crawlPage.offset(), elapsedMs(startedAt));
                 if (!properties.singlePageOnly()) {
-                    persistedRows = hotelRepository.upsertListings(parseResult.hotels());
-                    pageRepository.markCompleted(crawlPage.offset(), crawlPage.url(), parseResult.hotelCount());
-                    logProgress("PERSISTED", crawlPage, startedAt,
-                            "Persisted extracted hotels to poi and marked progress complete. affectedRows=%d".formatted(persistedRows));
-                } else {
-                    logProgress("PERSIST_SKIPPED", crawlPage, startedAt,
-                            "Single-page verification mode: skipped poi/progress persistence. extractedHotels=%d".formatted(parseResult.hotelCount()));
+                    pageRepository.markFailed(crawlPage.offset(), crawlPage.url(),
+                            new RuntimeException("DataDome challenge could not be resolved"));
+                }
+                return ListingCrawlResult.failed(crawlPage,
+                        new RuntimeException("DataDome challenge could not be resolved after retries"));
+            }
+
+            // === STEP 6: Parse and persist ===
+            ListingParseResult parseResult = listingParser.parse(html, crawlPage.url());
+            String hotelsJson = serializeHotels(parseResult.hotels());
+            int jsonChars = hotelsJson.length();
+            int jsonBytes = byteSize(hotelsJson);
+
+            log.info("TRIPADVISOR_EXTRACTION_SUMMARY url={} offset={} hotelCount={} htmlBytes={} jsonChars={} jsonBytes={} hotelReviewOccurrences={} snapshotPath={} elapsedMs={}",
+                    crawlPage.url(), crawlPage.offset(), parseResult.hotelCount(), htmlBytes, jsonChars, jsonBytes,
+                    hotelReviewOccurrences, htmlSnapshotPath, elapsedMs(startedAt));
+            if (parseResult.hotelCount() == 0) {
+                log.warn("TRIPADVISOR_ZERO_EXTRACTION_DIAGNOSTIC url={} offset={} reason='Rendered HTML contained no parseable Hotel_Review links' htmlBytes={} hotelReviewOccurrences={} title='{}' snapshotPath={} htmlPreview={}",
+                        crawlPage.url(), crawlPage.offset(), htmlBytes, hotelReviewOccurrences, title, htmlSnapshotPath, htmlPreview);
+            }
+            logHotelSummary(parseResult.hotels());
+            log.info("TRIPADVISOR_EXTRACTED_HOTELS_JSON url={} offset={} hotelCount={} jsonBytes={} hotelsJson={}",
+                    crawlPage.url(), crawlPage.offset(), parseResult.hotelCount(), jsonBytes, hotelsJson);
+
+            int persistedRows = 0;
+            if (!properties.singlePageOnly()) {
+                persistedRows = hotelRepository.upsertListings(parseResult.hotels());
+                pageRepository.markCompleted(crawlPage.offset(), crawlPage.url(), parseResult.hotelCount());
+                logProgress("PERSISTED", crawlPage, startedAt,
+                        "Persisted extracted hotels to poi and marked progress complete. affectedRows=%d".formatted(persistedRows));
+            } else {
+                logProgress("PERSIST_SKIPPED", crawlPage, startedAt,
+                        "Single-page verification mode: skipped poi/progress persistence. extractedHotels=%d".formatted(parseResult.hotelCount()));
+            }
+
+            log.info("TRIPADVISOR_DONE url={} offset={} extractedHotels={} persistedRows={} htmlBytes={} jsonBytes={} totalElapsedMs={}",
+                    crawlPage.url(), crawlPage.offset(), parseResult.hotelCount(), persistedRows, htmlBytes, jsonBytes, elapsedMs(startedAt));
+            return ListingCrawlResult.success(crawlPage, parseResult.hotelCount());
+        } catch (Exception e) {
+            if (!properties.singlePageOnly()) {
+                pageRepository.markFailed(crawlPage.offset(), crawlPage.url(), e);
+            }
+            log.error("TRIPADVISOR_FAILED url={} offset={} elapsedMs={} error={}",
+                    crawlPage.url(), crawlPage.offset(), elapsedMs(startedAt), e.getMessage(), e);
+            return ListingCrawlResult.failed(crawlPage, e);
+        }
+    }
+
+    // ==================== DataDome Challenge Handling ====================
+
+    /**
+     * Polls the page until real content (hotel links) appears or the DataDome
+     * challenge auto-resolves. DataDome's challenge page contains JavaScript that:
+     * 1. Fingerprints the browser (canvas, WebGL, etc.)
+     * 2. POSTs results to geo.captcha-delivery.com
+     * 3. Receives a datadome cookie
+     * 4. Auto-reloads the page with real content
+     * <p>
+     * This process takes 3-10 seconds. The previous code grabbed HTML immediately
+     * after DOMContentLoaded, before the challenge had time to resolve.
+     */
+    private boolean waitForRealContent(Page page, CrawlPage crawlPage, long startedAt, String phase) {
+        long deadline = System.currentTimeMillis() + 45_000; // 45 second timeout
+        int attempt = 0;
+        boolean challengeDetected = false;
+
+        while (System.currentTimeMillis() < deadline) {
+            attempt++;
+            try {
+                String currentHtml = page.content();
+                String currentTitle = page.title();
+
+                // Success: hotel links found in the rendered HTML
+                if (currentHtml.contains(HOTEL_LINK_MARKER)) {
+                    logProgress("CONTENT_FOUND", crawlPage, startedAt,
+                            "%s: Real page content with hotel links detected. attempt=%d title='%s' htmlLen=%d".formatted(
+                                    phase, attempt, currentTitle, currentHtml.length()));
+                    return true;
                 }
 
-                log.info("TRIPADVISOR_DONE url={} offset={} extractedHotels={} persistedRows={} htmlBytes={} jsonBytes={} totalElapsedMs={}",
-                        crawlPage.url(), crawlPage.offset(), parseResult.hotelCount(), persistedRows, htmlBytes, jsonBytes, elapsedMs(startedAt));
-                return ListingCrawlResult.success(crawlPage, parseResult.hotelCount());
-            } catch (Exception e) {
-                if (attempt < maxRetries) {
-                    log.warn("TRIPADVISOR_RETRY attempt={}/{} url={} offset={} error={}",
-                            attempt, maxRetries, crawlPage.url(), crawlPage.offset(), e.getMessage());
-                    randomDelay.pauseLonger();
-                } else {
-                    if (!properties.singlePageOnly()) {
-                        pageRepository.markFailed(crawlPage.offset(), crawlPage.url(), e);
+                // Detect DataDome challenge page
+                if (isDataDomeChallenge(currentHtml, currentTitle)) {
+                    if (!challengeDetected) {
+                        challengeDetected = true;
+                        logProgress("DATADOME_DETECTED", crawlPage, startedAt,
+                                "%s: DataDome challenge page detected, waiting for auto-resolution... attempt=%d title='%s' htmlLen=%d".formatted(
+                                        phase, attempt, currentTitle, currentHtml.length()));
                     }
-                    log.error("TRIPADVISOR_FAILED url={} offset={} elapsedMs={} error={}",
-                            crawlPage.url(), crawlPage.offset(), elapsedMs(startedAt), e.getMessage(), e);
-                    return ListingCrawlResult.failed(crawlPage, e);
+                    // The challenge script will auto-reload the page.
+                    // Just wait and poll again.
+                } else if (currentHtml.length() > 15_000) {
+                    // Substantial content but no hotel links — might be a different page type
+                    // or the SPA is still rendering. Wait a bit more.
+                    logProgress("CONTENT_MAYBE", crawlPage, startedAt,
+                            "%s: Substantial content but no hotel links yet, waiting for JS render. attempt=%d title='%s' htmlLen=%d".formatted(
+                                    phase, attempt, currentTitle, currentHtml.length()));
+                    Thread.sleep(3000);
+                    // Check again after waiting
+                    currentHtml = page.content();
+                    if (currentHtml.contains(HOTEL_LINK_MARKER)) {
+                        return true;
+                    }
+                    // If still no hotel links but content is substantial and not a challenge,
+                    // return true (might be end of listings or different page structure)
+                    if (currentHtml.length() > 15_000 && !isDataDomeChallenge(currentHtml, page.title())) {
+                        logProgress("CONTENT_ACCEPTED", crawlPage, startedAt,
+                                "%s: Accepting page with substantial content (no hotel links found but not a challenge page). attempt=%d htmlLen=%d".formatted(
+                                        phase, attempt, currentHtml.length()));
+                        return true;
+                    }
                 }
+            } catch (Exception e) {
+                // Page might be in the middle of a reload (challenge auto-resolve)
+                log.debug("{}: Error checking page content (page may be reloading): {}", phase, e.getMessage());
+            }
+
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
             }
         }
-        // Should never reach here, but just in case
-        return ListingCrawlResult.failed(crawlPage, new IllegalStateException("Exhausted all retry attempts"));
+
+        logProgress("CONTENT_TIMEOUT", crawlPage, startedAt,
+                "%s: Timed out waiting for real content after %d attempts".formatted(phase, attempt));
+        return false;
     }
+
+    /**
+     * Detects whether the current page is a DataDome challenge page.
+     * <p>
+     * DataDome challenge pages have these characteristics:
+     * - Title is "tripadvisor.com" (lowercase — real pages have descriptive titles)
+     * - Very small HTML (< 5KB — real pages are 100KB+)
+     * - Contains references to "captcha-delivery.com"
+     * - Contains a JavaScript variable "dd" with challenge parameters
+     */
+    private boolean isDataDomeChallenge(String html, String title) {
+        if (html == null || html.isBlank()) {
+            return true;
+        }
+        // DataDome's script host
+        if (html.contains(DATADOME_MARKER)) {
+            return true;
+        }
+        // DataDome challenge variable
+        if (html.contains("var dd=") && html.contains("'cid'")) {
+            return true;
+        }
+        // Challenge page title + small HTML
+        if (DATADOME_CHALLENGE_TITLE.equals(title) && html.length() < 5_000) {
+            return true;
+        }
+        // Explicit security check pages
+        if (html.contains("cf-challenge") || html.contains("cf-browser-verification")) {
+            return true;
+        }
+        return false;
+    }
+
+    // ==================== Human Behavior Simulation ====================
+
+    /**
+     * Simulates human-like browser interactions to reduce bot detection risk.
+     * DataDome tracks mouse movements, scroll patterns, and interaction timing.
+     * <p>
+     * Key behaviors:
+     * - Random mouse movements (not instant teleport)
+     * - Gradual scrolling (simulates reading)
+     * - Variable timing between actions (not perfectly periodic)
+     */
+    private void performHumanBehavior(Page page) {
+        try {
+            randomDelay.pause();
+
+            // Random mouse movement to a position
+            int x1 = 100 + (int) (Math.random() * 800);
+            int y1 = 100 + (int) (Math.random() * 400);
+            page.mouse().move(x1, y1);
+            Thread.sleep(300 + (long) (Math.random() * 700));
+
+            // Move mouse again (humans move multiple times)
+            int x2 = 200 + (int) (Math.random() * 600);
+            int y2 = 200 + (int) (Math.random() * 300);
+            page.mouse().move(x2, y2);
+            Thread.sleep(200 + (long) (Math.random() * 500));
+
+            // Scroll down gradually (simulates reading the page)
+            for (int i = 0; i < 4; i++) {
+                page.mouse().wheel(0, 200 + (int) (Math.random() * 200));
+                Thread.sleep(400 + (long) (Math.random() * 800));
+            }
+
+            // Scroll back up slightly (humans re-read sections)
+            page.mouse().wheel(0, -300);
+            Thread.sleep(300 + (long) (Math.random() * 500));
+
+            // Final random mouse movement
+            int x3 = 300 + (int) (Math.random() * 500);
+            int y3 = 150 + (int) (Math.random() * 350);
+            page.mouse().move(x3, y3);
+            Thread.sleep(200 + (long) (Math.random() * 400));
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            log.debug("Human behavior simulation error (non-fatal): {}", e.getMessage());
+        }
+    }
+
+    // ==================== Stealth Script ====================
+
+    /**
+     * Injects MINIMAL stealth scripts to hide Playwright automation markers.
+     * <p>
+     * CRITICAL: Less is more. The previous script overrode too many properties,
+     * and the overrides themselves were detectable:
+     * - navigator.webdriver = undefined → real Chrome has false, not undefined
+     * - window.chrome = { runtime: {} } → real Chrome has a much richer object
+     * - Fake plugins array → outdated, doesn't match modern Chrome
+     * - WebGL vendor "Intel Iris OpenGL Engine" on Linux → suspicious
+     * - Screen dimension overrides → detectable via property descriptor checks
+     * <p>
+     * We now only fix the most critical, universally-checked signals:
+     * 1. navigator.webdriver (Playwright sets true, real Chrome has false)
+     * 2. permissions.query (Playwright breaks this)
+     * 3. Remove automation framework traces
+     * 4. Hide toString() tampering
+     */
+    private void injectStealthScripts(Page page) {
+        page.addInitScript("""
+                // --- Fix navigator.webdriver ---
+                // Playwright sets this to true. Real Chrome has false.
+                // Do NOT set to undefined — that's itself a detection signal.
+                try {
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => false,
+                        configurable: true
+                    });
+                } catch (e) {}
+                
+                // --- Fix permissions.query ---
+                // Playwright breaks the native permissions API
+                try {
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) => (
+                        parameters.name === 'notifications' ?
+                            Promise.resolve({ state: Notification.permission }) :
+                            originalQuery(parameters)
+                    );
+                } catch (e) {}
+                
+                // --- Remove automation framework traces ---
+                delete window.callPhantom;
+                delete window._phantom;
+                delete window.__phantomas;
+                delete window.__nightmare;
+                delete window._selenium;
+                delete window.__webdriver_evaluate;
+                delete window.__driver_unwrapped;
+                delete window.__webdriver_script_fn;
+                delete window.__driver_evaluate;
+                delete window.__selenium_evaluate;
+                delete window.__selenium_unwrapped;
+                delete window.__fxdriver_evaluate;
+                delete window.__fxdriver_unwrapped;
+                
+                // --- Hide toString() tampering ---
+                // Bot detectors call toString() on native functions to check
+                // if they've been monkey-patched. We patch toString itself.
+                try {
+                    const nativeToString = Function.prototype.toString;
+                    const overrides = new WeakSet();
+                    if (navigator.permissions && navigator.permissions.query) {
+                        overrides.add(navigator.permissions.query);
+                    }
+                    Function.prototype.toString = function() {
+                        if (overrides.has(this)) {
+                            return 'function query() { [native code] }';
+                        }
+                        return nativeToString.call(this);
+                    };
+                } catch (e) {}
+                """);
+    }
+
+    // ==================== Browser Configuration ====================
+
+    /**
+     * Minimal Chrome launch arguments.
+     * <p>
+     * The previous code had 20+ flags (--disable-extensions, --mute-audio,
+     * --disable-sync, --disable-popup-blocking, etc.). Real Chrome users
+     * don't launch with 20 command-line flags. While DataDome can't directly
+     * read launch flags, some flags affect detectable browser behavior.
+     * <p>
+     * We keep only essential flags for Docker/Linux compatibility.
+     */
+    private static java.util.List<String> minimalChromeArgs() {
+        return java.util.List.of(
+                "--no-sandbox",                    // Required for Docker/root
+                "--disable-setuid-sandbox",        // Required for Docker/root
+                "--no-first-run",                  // Skip first-run wizard
+                "--no-default-browser-check",      // Skip default browser prompt
+                "--disable-dev-shm-usage",         // Prevent /dev/shm issues in Docker
+                "--password-store=basic",          // Avoid keyring issues on Linux
+                "--use-mock-keychain"              // Avoid keychain issues on Linux
+        );
+    }
+
+    /**
+     * HTTP headers sent with every request.
+     * <p>
+     * We keep this MINIMAL — Chrome automatically sends most headers
+     * (sec-ch-ua, sec-fetch-*, Accept-Encoding, etc.) with correct values
+     * matching the actual Chrome version. Setting them manually risks
+     * creating a mismatch between the sec-ch-ua header and the real version.
+     */
+    private static java.util.Map<String, String> browserHeaders() {
+        java.util.Map<String, String> headers = new java.util.LinkedHashMap<>();
+        headers.put("Accept-Language", "en-US,en;q=0.9");
+        headers.put("Upgrade-Insecure-Requests", "1");
+        return headers;
+    }
+
+    // ==================== Helper Methods (unchanged) ====================
 
     private void logProgress(String step, CrawlPage crawlPage, long startedAt, String message) {
         log.info("TRIPADVISOR_PROGRESS step={} offset={} url={} elapsedMs={} message={}",
@@ -280,16 +636,9 @@ public class ListingWorker {
         return System.currentTimeMillis() - startedAt;
     }
 
-    /**
-     * Creates and returns the path to a persistent user data directory.
-     * When attempt > 1, uses a fresh directory to avoid DataDome cookie contamination
-     * from previous blocked attempts.
-     */
-    private Path ensureUserDataDir(int attempt) {
+    private Path ensureUserDataDir() {
         try {
-            Path dir = attempt <= 1
-                    ? Path.of("data", "tripadvisor-browser-profile")
-                    : Path.of("data", "tripadvisor-browser-profile-" + attempt);
+            Path dir = Path.of("data", "tripadvisor-browser-profile");
             Files.createDirectories(dir);
             return dir;
         } catch (Exception e) {
@@ -297,53 +646,7 @@ public class ListingWorker {
         }
     }
 
-    /**
-     * Deletes a contaminated browser profile directory so the next retry
-     * starts with a completely fresh state.
-     */
-    private void deleteUserDataDir(Path dir) {
-        try {
-            if (Files.exists(dir)) {
-                try (var stream = Files.walk(dir)) {
-                    stream.sorted(java.util.Comparator.reverseOrder())
-                            .forEach(p -> {
-                                try {
-                                    Files.deleteIfExists(p);
-                                } catch (Exception ignored) {
-                                }
-                            });
-                }
-                log.info("Deleted contaminated browser profile: {}", dir);
-            }
-        } catch (Exception e) {
-            log.warn("Failed to delete browser profile directory {}: {}", dir, e.getMessage());
-        }
-    }
-
-    /**
-     * Detects whether the page HTML is a DataDome CAPTCHA challenge rather than
-     * the actual Tripadvisor content. DataDome pages are ~1.5KB, contain
-     * geo.captcha-delivery.com, and have no Hotel_Review links.
-     */
-    private boolean isDataDomeBlock(String html) {
-        if (html == null || html.isBlank()) {
-            return false;
-        }
-        return html.contains("geo.captcha-delivery.com")
-                && html.contains("DataDome")
-                && html.length() < 5000;
-    }
-
-    /**
-     * Resolves the path to a system-installed Google Chrome executable.
-     * DataDome fingerprints the TLS stack (JA3/JA4) of the browser — Playwright's
-     * bundled Chromium has a different TLS fingerprint than real Google Chrome,
-     * so DataDome blocks it at the network level before any JavaScript runs.
-     * Using the system Chrome bypasses this because its TLS fingerprint matches
-     * what real users have.
-     */
     private static String resolveChromeExecutable() {
-        // Common paths for Google Chrome on Linux
         String[] candidates = {
                 "/usr/bin/google-chrome-stable",
                 "/usr/bin/google-chrome",
@@ -356,174 +659,7 @@ public class ListingWorker {
                 return candidate;
             }
         }
-        // Fall back to Playwright's bundled Chromium if no system Chrome found
         log.warn("No system Google Chrome found at common paths. Falling back to Playwright's bundled Chromium (may trigger DataDome).");
         return null;
-    }
-
-    /**
-     * Chromium launch arguments.
-     * When headed=false, includes --headless=new (Chrome 112+ new headless mode
-     * which shares the same rendering path as headed Chrome).
-     * When headed=true, runs as a normal visible browser — the most reliable
-     * way to bypass anti-bot systems.
-     *
-     * IMPORTANT: Do NOT include --disable-blink-features=AutomationControlled —
-     * anti-bot services actively check for this flag.
-     */
-    private static java.util.List<String> antiDetectionArgs(boolean headed) {
-        java.util.List<String> args = new java.util.ArrayList<>(java.util.List.of(
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--password-store=basic",
-                "--use-mock-keychain",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-                "--disable-features=Translate",
-                "--disable-sync",
-                "--disable-default-apps",
-                "--disable-extensions",
-                "--disable-popup-blocking",
-                "--disable-prompt-on-repost",
-                "--disable-hang-monitor",
-                "--metrics-recording-only",
-                "--mute-audio"
-        ));
-        if (!headed) {
-            args.add("--headless=new");
-        }
-        return args;
-    }
-
-    /**
-     * Injects JavaScript into every frame to hide Playwright automation markers.
-     * DataDome checks for navigator.webdriver, chrome.runtime, and other properties
-     * that reveal headless/automated browsers.
-     */
-    private void injectStealthScripts(Page page) {
-        page.addInitScript("""
-                // --- Remove navigator.webdriver flag (the #1 bot detection signal) ---
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-
-                // --- Spoof chrome.runtime to appear as regular Chrome ---
-                window.chrome = {
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {},
-                    app: {}
-                };
-
-                // --- Overwrite permissions to avoid detection ---
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
-                        originalQuery(parameters)
-                );
-
-                // --- Overwrite plugins to look like a normal browser ---
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => {
-                        const plugins = [
-                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-                            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-                        ];
-                        plugins.item = (i) => plugins[i];
-                        plugins.namedItem = (name) => plugins.find(p => p.name === name);
-                        plugins.refresh = () => {};
-                        return plugins;
-                    }
-                });
-
-                // --- Overwrite languages ---
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en']
-                });
-
-                // --- Overwrite hardwareConcurrency ---
-                Object.defineProperty(navigator, 'hardwareConcurrency', {
-                    get: () => 8
-                });
-
-                // --- Overwrite deviceMemory ---
-                Object.defineProperty(navigator, 'deviceMemory', {
-                    get: () => 8
-                });
-
-                // --- Overwrite platform ---
-                Object.defineProperty(navigator, 'platform', {
-                    get: () => 'Linux x86_64'
-                });
-
-                // --- Overwrite vendor ---
-                Object.defineProperty(navigator, 'vendor', {
-                    get: () => 'Google Inc.'
-                });
-
-                // --- Overwrite connection ---
-                if (navigator.connection) {
-                    Object.defineProperty(navigator.connection, 'rtt', {
-                        get: () => 100
-                    });
-                }
-
-                // --- Remove PhantomJS traces ---
-                delete window.callPhantom;
-                delete window._phantom;
-                delete window.__phantomas;
-
-                // --- Spoof WebGL vendor/renderer ---
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) {
-                        return 'Intel Inc.';
-                    }
-                    if (parameter === 37446) {
-                        return 'Intel Iris OpenGL Engine';
-                    }
-                    return getParameter.call(this, parameter);
-                };
-
-                // --- Overwrite screen dimensions ---
-                Object.defineProperty(screen, 'availWidth', { get: () => 1366 });
-                Object.defineProperty(screen, 'availHeight', { get: () => 768 });
-                Object.defineProperty(screen, 'width', { get: () => 1366 });
-                Object.defineProperty(screen, 'height', { get: () => 768 });
-                Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-                Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
-
-                // --- Overwrite window.outerWidth/Height ---
-                Object.defineProperty(window, 'outerWidth', { get: () => 1366 });
-                Object.defineProperty(window, 'outerHeight', { get: () => 768 });
-
-                // --- Overwrite innerWidth/innerHeight ---
-                Object.defineProperty(window, 'innerWidth', { get: () => 1366 });
-                Object.defineProperty(window, 'innerHeight', { get: () => 768 });
-
-                // --- Overwrite Notification to avoid detection ---
-                if (window.Notification) {
-                    const originalPermission = Object.getOwnPropertyDescriptor(Notification, 'permission');
-                    Object.defineProperty(Notification, 'permission', {
-                        ...originalPermission,
-                        get: () => 'default'
-                    });
-                }
-                """);
-    }
-
-    private static final class MapUtils {
-        private static java.util.Map<String, String> headers() {
-            return java.util.Map.of(
-                    "Accept-Language", "en-US,en;q=0.9",
-                    "Upgrade-Insecure-Requests", "1"
-            );
-        }
     }
 }
