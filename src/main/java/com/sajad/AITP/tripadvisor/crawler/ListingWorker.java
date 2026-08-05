@@ -119,9 +119,7 @@ public class ListingWorker {
             // obtain the datadome cookie, which is then sent on subsequent requests.
             logProgress("WARMUP_START", crawlPage, startedAt,
                     "Visiting Tripadvisor homepage for DataDome cookie warming");
-            page.navigate(TRIPADVISOR_HOMEPAGE, new Page.NavigateOptions()
-                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
-                    .setTimeout(properties.navigationTimeoutMs()));
+            page = navigateSafely(context, page, TRIPADVISOR_HOMEPAGE, crawlPage, startedAt, "WARMUP");
 
             boolean warmupOk = waitForRealContent(page, crawlPage, startedAt, "WARMUP");
             if (warmupOk) {
@@ -139,9 +137,7 @@ public class ListingWorker {
 
             // === STEP 2: Navigate to the target listing page ===
             logProgress("NAVIGATE_START", crawlPage, startedAt, "Navigating to Tripadvisor listing page");
-            page.navigate(crawlPage.url(), new Page.NavigateOptions()
-                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
-                    .setTimeout(properties.navigationTimeoutMs()));
+            page = navigateSafely(context, page, crawlPage.url(), crawlPage, startedAt, "LISTING");
 
             // === STEP 3: Wait for DataDome challenge to resolve and real content to appear ===
             // DataDome serves a JS challenge page that auto-fingerprints the browser,
@@ -260,7 +256,7 @@ public class ListingWorker {
 
             log.info("TRIPADVISOR_DONE url={} offset={} extractedHotels={} persistedRows={} htmlBytes={} jsonBytes={} totalElapsedMs={}",
                     crawlPage.url(), crawlPage.offset(), parseResult.hotelCount(), persistedRows, htmlBytes, jsonBytes, elapsedMs(startedAt));
-            return ListingCrawlResult.success(crawlPage, parseResult.hotelCount());
+            return ListingCrawlResult.success(crawlPage, parseResult.hotelCount(), parseResult.hotels());
         } catch (Exception e) {
             if (!properties.singlePageOnly()) {
                 pageRepository.markFailed(crawlPage.offset(), crawlPage.url(), e);
@@ -268,6 +264,38 @@ public class ListingWorker {
             log.error("TRIPADVISOR_FAILED url={} offset={} elapsedMs={} error={}",
                     crawlPage.url(), crawlPage.offset(), elapsedMs(startedAt), e.getMessage(), e);
             return ListingCrawlResult.failed(crawlPage, e);
+        }
+    }
+
+    /**
+     * Navigates the given page to {@code url}, transparently recovering when the
+     * DataDome challenge auto-reload closes the original page/tab. If the page is
+     * no longer usable, a fresh page is created from the context and the
+     * navigation is retried on it. Returns the usable page (possibly a new one).
+     */
+    private Page navigateSafely(BrowserContext context, Page page, String url,
+                                CrawlPage crawlPage, long startedAt, String phase) {
+        try {
+            page.navigate(url, new Page.NavigateOptions()
+                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(properties.navigationTimeoutMs()));
+            return page;
+        } catch (Exception e) {
+            log.warn("TRIPADVISOR_NAVIGATE_RECOVER {} phase={} url={} error={} — recreating page and retrying",
+                    phase, phase, url, e.getMessage());
+            try {
+                Page fresh = context.pages().isEmpty() ? context.newPage() : context.pages().get(0);
+                fresh.setDefaultNavigationTimeout(properties.navigationTimeoutMs());
+                injectStealthScripts(fresh);
+                fresh.navigate(url, new Page.NavigateOptions()
+                        .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(properties.navigationTimeoutMs()));
+                return fresh;
+            } catch (Exception retryError) {
+                log.error("TRIPADVISOR_NAVIGATE_RECOVER_FAILED phase={} url={} error={}",
+                        phase, url, retryError.getMessage());
+                throw retryError;
+            }
         }
     }
 
