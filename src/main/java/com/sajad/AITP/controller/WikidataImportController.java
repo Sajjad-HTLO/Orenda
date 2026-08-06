@@ -11,6 +11,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
@@ -38,18 +39,21 @@ public class WikidataImportController {
     }
 
     @PostMapping("/import")
-    public ResponseEntity<Map<String, Object>> triggerImport() {
+    public ResponseEntity<Map<String, Object>> triggerImport(
+            @RequestParam(name = "reset", defaultValue = "false") boolean resetFromStart) {
         try {
-            log.info("Manual Wikidata import triggered via REST API");
+            log.info("Manual Wikidata import triggered via REST API (resetFromStart={})", resetFromStart);
             JobParameters params = new JobParametersBuilder()
                     .addLong("runAt", System.currentTimeMillis())
                     .addString("triggeredBy", "rest-api")
+                    .addString("resetFromStart", String.valueOf(resetFromStart))
                     .toJobParameters();
             jobLauncher.run(wikidataImportJob, params);
 
             return ResponseEntity.accepted().body(Map.of(
                     "status", "STARTED",
-                    "message", "Wikidata import job launched successfully"
+                    "message", "Wikidata import job launched successfully",
+                    "resetFromStart", resetFromStart
             ));
         } catch (Exception e) {
             log.error("Failed to launch Wikidata import job", e);

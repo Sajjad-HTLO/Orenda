@@ -9,6 +9,7 @@ import org.springframework.web.client.RestClient;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -34,10 +35,16 @@ public class WikidataClient {
 
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final int pageSize;
+    private final int maxPagesPerCategory;
 
     public WikidataClient(
-            @Value("${wikidata.import.query-timeout-seconds:120}") int queryTimeoutSeconds) {
+            @Value("${wikidata.import.query-timeout-seconds:120}") int queryTimeoutSeconds,
+            @Value("${wikidata.import.page-size:500}") int pageSize,
+            @Value("${wikidata.import.max-pages-per-category:20}") int maxPagesPerCategory) {
         this.objectMapper = new ObjectMapper();
+        this.pageSize = Math.max(1, pageSize);
+        this.maxPagesPerCategory = Math.max(1, maxPagesPerCategory);
 
         HttpClient httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
@@ -98,6 +105,14 @@ public class WikidataClient {
 
                 // ── Shopping / Leisure ───────────────────────────────────────
                 cat("bazaar", "shopping", "bazaar", "Q330284"),
+                cat("tourist_attraction", "sightseeing", "tourist_attraction", "Q570116"),
+                cat("park", "leisure", "park", "Q22698"),
+                cat("botanical_garden", "leisure", "botanical_garden", "Q42240"),
+                cat("hotel", "accommodation", "hotel", "Q27686"),
+                cat("restaurant", "food", "restaurant", "Q11707"),
+                cat("cafe", "food", "cafe", "Q30022"),
+                cat("world_heritage_site", "historic", "world_heritage_site", "Q9259"),
+                cat("monastery", "historic", "monastery", "Q44613"),
                 cat("theme_park", "leisure", "theme_park", "Q2416723"),
                 cat("zoo", "leisure", "zoo", "Q43501"),
                 cat("stadium", "leisure", "stadium", "Q483110"),
@@ -114,7 +129,37 @@ public class WikidataClient {
     /**
      * Executes a single SPARQL query and returns raw binding maps.
      */
-    public List<Map<String, WikidataSparqlResponse.Binding>> executeQuery(String sparql)
+    public List<Map<String, WikidataSparqlResponse.Binding>> executeQuery(
+            String sparql,
+            String category,
+            String subcategory)
+            throws InterruptedException {
+        List<Map<String, WikidataSparqlResponse.Binding>> allBindings = new ArrayList<>();
+        int pagesFetched = 0;
+
+        for (int page = 0; page < maxPagesPerCategory; page++) {
+            int offset = page * pageSize;
+            String pagedSparql = sparql + "\nLIMIT " + pageSize + "\nOFFSET " + offset;
+            List<Map<String, WikidataSparqlResponse.Binding>> pageBindings = executeQueryPage(pagedSparql);
+            pagesFetched++;
+
+            allBindings.addAll(pageBindings);
+            log.info("Wikidata SPARQL page fetched | page={} | page_size={} | received={} | total_so_far={}",
+                    page + 1, pageSize, pageBindings.size(), allBindings.size());
+
+            if (pageBindings.size() < pageSize) {
+                log.info("Wikidata SPARQL category summary | category={} | subcategory={} | pages_fetched={} | total_records={}",
+                        category, subcategory, pagesFetched, allBindings.size());
+                return allBindings;
+            }
+        }
+
+        log.warn("Wikidata SPARQL pagination reached configured cap | category={} | subcategory={} | max_pages_per_category={} | total_records={}",
+                category, subcategory, maxPagesPerCategory, allBindings.size());
+        return allBindings;
+    }
+
+    private List<Map<String, WikidataSparqlResponse.Binding>> executeQueryPage(String sparql)
             throws InterruptedException {
         int maxRetries = 3;
         for (int attempt = 0; attempt < maxRetries; attempt++) {
@@ -224,7 +269,7 @@ public class WikidataClient {
     /**
      * Builds a SPARQL query that:
      * <ul>
-     *   <li>Finds items in Turkey (wdt:P17 wd:Q43)</li>
+     *   <li>Finds items in Turkey by direct country (P17) OR via admin containment (P131* -> P17)</li>
      *   <li>That are instances of (or subclass of) the given type</li>
      *   <li>With geo-coordinates (wdt:P625)</li>
      *   <li>Fetches TR label via OPTIONAL, EN label via OPTIONAL</li>
@@ -247,8 +292,15 @@ public class WikidataClient {
                 SELECT DISTINCT ?item ?itemLabel ?itemLabelEn ?itemDescription ?itemDescriptionEn
                        ?lat ?lon ?image ?instanceOf ?instanceOfLabel
                 WHERE {
-                  ?item wdt:P17 wd:%s;
-                        wdt:P31/wdt:P279* wd:%s;
+                  {
+                    { ?item wdt:P17 wd:%s. }
+                    UNION
+                    {
+                      ?item wdt:P131* ?locatedIn.
+                      ?locatedIn wdt:P17 wd:%s.
+                    }
+                  }
+                  ?item wdt:P31/wdt:P279* wd:%s;
                         wdt:P625 ?coord.
                   BIND(xsd:float(STRBEFORE(STRAFTER(STR(?coord), "Point("), " ")) AS ?lon)
                   BIND(xsd:float(STRBEFORE(STRAFTER(STR(?coord), " "), ")")) AS ?lat)
@@ -265,8 +317,8 @@ public class WikidataClient {
                     ?instanceOf rdfs:label ?instanceOfLabel.
                   }
                 }
-                LIMIT 1000
-                """.formatted(Q_TURKEY, typeQid);
+                ORDER BY ?item
+                """.formatted(Q_TURKEY, Q_TURKEY, typeQid);
     }
 
     // ── Category query descriptor ─────────────────────────────────────────────

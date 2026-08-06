@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Converts a {@link WikidataRawPoi} into a {@link PoiEntity} ready for PostgreSQL insertion.
@@ -26,44 +27,58 @@ import java.util.Map;
 @Component
 public class WikidataPoiProcessor implements ItemProcessor<WikidataRawPoi, PoiEntity> {
 
+    private static final long LOG_EVERY_N_ITEMS = 200;
+
     private final ObjectMapper jackson = new ObjectMapper();
+    private final AtomicLong processedCount = new AtomicLong(0);
 
     /**
      * Converts a Wikidata Q-ID to a negative long for use as osm_id.
      * Example: "Q12345" → -12345, "Q42" → -42
      */
     static long qidToLong(String qid) {
+        qid = normalizeQid(qid);
         if (qid == null || !qid.startsWith("Q")) return 0;
         try {
             return -Long.parseLong(qid.substring(1));
         } catch (NumberFormatException e) {
-            // Some Q-IDs are full URIs: extract
-            int lastSlash = qid.lastIndexOf('/');
-            if (lastSlash >= 0) {
-                String extracted = qid.substring(lastSlash + 1);
-                if (extracted.startsWith("Q")) {
-                    try {
-                        return -Long.parseLong(extracted.substring(1));
-                    } catch (NumberFormatException ignored) {
-                    }
-                }
-            }
             return 0;
         }
     }
 
+    static String normalizeQid(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        int lastSlash = raw.lastIndexOf('/');
+        String candidate = lastSlash >= 0 ? raw.substring(lastSlash + 1) : raw;
+        return candidate.startsWith("Q") ? candidate : raw;
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
 
     @Override
     public PoiEntity process(WikidataRawPoi poi) throws Exception {
-        long osmId = qidToLong(poi.getQid());
+        String normalizedQid = normalizeQid(poi.getQid());
+        long osmId = qidToLong(normalizedQid);
         short score = calculateCompleteness(poi);
-        String attributesJson = jackson.writeValueAsString(buildAttributes(poi));
+        String attributesJson = jackson.writeValueAsString(buildAttributes(poi, normalizedQid));
+
+        long current = processedCount.incrementAndGet();
+        if (current % LOG_EVERY_N_ITEMS == 0) {
+            log.info(
+                    "Wikidata import progress | stage=process | processed={} | last_qid={} | category={} | subcategory={}",
+                    current,
+                    poi.getQid(),
+                    poi.getCategory(),
+                    poi.getSubcategory());
+        }
 
         return PoiEntity.builder()
                 .osmId(osmId)
                 .osmType("Q")
-                .wikidataId(poi.getQid())
+                .wikidataId(normalizedQid)
                 .nameTr(poi.getLabelTr() != null ? poi.getLabelTr() : "")
                 .nameEn(poi.getLabelEn())
                 .category(poi.getCategory())
@@ -76,9 +91,9 @@ public class WikidataPoiProcessor implements ItemProcessor<WikidataRawPoi, PoiEn
                 .build();
     }
 
-    private Map<String, Object> buildAttributes(WikidataRawPoi poi) {
+    private Map<String, Object> buildAttributes(WikidataRawPoi poi, String normalizedQid) {
         Map<String, Object> attrs = new LinkedHashMap<>();
-        attrs.put("wikidata_id", poi.getQid());
+        attrs.put("wikidata_id", normalizedQid);
         attrs.put("source", "wikidata");
         if (poi.getLabelTr() != null) attrs.put("name", poi.getLabelTr());
         if (poi.getLabelEn() != null) attrs.put("name:en", poi.getLabelEn());
