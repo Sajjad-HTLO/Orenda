@@ -29,6 +29,7 @@ public class CrawlManager {
     private final ListingWorker listingWorker;
     private final HotelDetailWorker hotelDetailWorker;
     private final HotelRepository hotelRepository;
+    private final CrawlerPropertiesFileUpdater propertiesFileUpdater;
 
     /**
      * In-memory registry of hotel detail URLs that have already been successfully
@@ -46,12 +47,14 @@ public class CrawlManager {
             PaginationGenerator paginationGenerator,
             ListingWorker listingWorker,
             HotelDetailWorker hotelDetailWorker,
-            HotelRepository hotelRepository) {
+            HotelRepository hotelRepository,
+            CrawlerPropertiesFileUpdater propertiesFileUpdater) {
         this.properties = properties;
         this.paginationGenerator = paginationGenerator;
         this.listingWorker = listingWorker;
         this.hotelDetailWorker = hotelDetailWorker;
         this.hotelRepository = hotelRepository;
+        this.propertiesFileUpdater = propertiesFileUpdater;
     }
 
     /**
@@ -89,6 +92,7 @@ public class CrawlManager {
                         page.offset(), page.url(), listingResult.errorMessage());
                 consecutiveEmptyPages++;
                 offset = paginationGenerator.nextOffset(offset);
+                persistNextPageUrl(offset);
                 continue;
             }
             if (listingResult.skipped()) {
@@ -97,6 +101,7 @@ public class CrawlManager {
                         page.offset(), page.url());
                 consecutiveEmptyPages++;
                 offset = paginationGenerator.nextOffset(offset);
+                persistNextPageUrl(offset);
                 continue;
             }
 
@@ -124,6 +129,7 @@ public class CrawlManager {
                 break;
             }
             offset = paginationGenerator.nextOffset(offset);
+            persistNextPageUrl(offset);
         }
 
         log.info("Tripadvisor crawl manager finished. submittedPages={}, completedPages={}, skippedPages={}, failedPages={}, extractedHotels={}, detailedHotels={}, totalTripadvisorPois={}",
@@ -216,6 +222,16 @@ public class CrawlManager {
                 pending.isEmpty() ? 0 : Math.round(100.0 * succeeded / pending.size()),
                 hotelRepository.countHotels(), System.currentTimeMillis() - startedAt);
         return succeeded;
+    }
+
+    /**
+     * Persists the URL of the next page to process back into the
+     * {@code application.properties} file, so a restarted crawler resumes from
+     * where this run left off. Non-fatal: failures are logged and swallowed.
+     */
+    private void persistNextPageUrl(int nextOffset) {
+        CrawlPage nextPage = paginationGenerator.pageForOffset(nextOffset);
+        propertiesFileUpdater.updateBaseUrl(nextPage.url());
     }
 
     /**
