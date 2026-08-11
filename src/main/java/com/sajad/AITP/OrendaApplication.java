@@ -4,10 +4,10 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
-public class AitpApplication {
+public class OrendaApplication {
 
 	public static void main(String[] args) {
-		SpringApplication.run(AitpApplication.class, args);
+		SpringApplication.run(OrendaApplication.class, args);
 	}
 
 }
