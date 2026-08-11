@@ -352,7 +352,8 @@ public class HotelDetailWorker {
                 "--no-default-browser-check",
                 "--disable-dev-shm-usage",
                 "--password-store=basic",
-                "--use-mock-keychain");
+                "--use-mock-keychain",
+                "--start-minimized");
     }
 
     private static java.util.Map<String, String> browserHeaders() {

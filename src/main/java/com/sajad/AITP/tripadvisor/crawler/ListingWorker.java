@@ -558,7 +558,8 @@ public class ListingWorker {
                 "--no-default-browser-check",      // Skip default browser prompt
                 "--disable-dev-shm-usage",         // Prevent /dev/shm issues in Docker
                 "--password-store=basic",          // Avoid keyring issues on Linux
-                "--use-mock-keychain"              // Avoid keychain issues on Linux
+                "--use-mock-keychain",             // Avoid keychain issues on Linux
+                "--start-minimized"                // Open the embedded browser minimized
         );
     }
 

@@ -32,23 +32,78 @@ spatial search API, and integrates free third-party services for weather and rou
 ## Prerequisites
 
 - JDK 21+
-- PostgreSQL 15+ with PostGIS extension
-- Database `aitp` accessible at `localhost:5432` (user `postgres`, password `postgres`)
+- [Docker](https://www.docker.com/) (to run the `aitp-pg` PostGIS container)
+- Database `aitp` accessible at `localhost:5432` (user `postgres`, password `postgres`) — provided by the `aitp-pg` container below
+
+---
+
+## Database container (`aitp-pg`)
+
+The app expects a PostgreSQL + PostGIS instance at `localhost:5432`, with database `aitp` and credentials
+`postgres` / `postgres`, running in a Docker container named `aitp-pg`. The container also holds the
+PostGIS extensions (`postgis`, `uuid-ossp`) required by the `poi` schema.
+
+### Create the container
+
+```bash
+# 1. Pull the PostGIS-enabled PostgreSQL image
+docker pull postgis/postgis:16-3.4
+
+# 2. Create a named volume so data survives container recreation
+docker volume create aitp-pg-data
+
+# 3. Create and start the container
+docker run -d \
+  --name aitp-pg \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=aitp \
+  -p 5432:5432 \
+  -v aitp-pg-data:/var/lib/postgresql/data \
+  postgis/postgis:16-3.4
+```
+
+> **Image tags:** `postgis/postgis:16-3.4` bundles PostgreSQL 16 + PostGIS 3.4. The app requires
+> PostgreSQL 15+, so `15-3.4`, `16-3.5`, `17-3.5`, … also work — just swap the tag in the commands above.
+>
+> **Port conflict:** if `5432` is already taken on your host, map a different host port (e.g.
+> `-p 5433:5432`) and update `spring.datasource.url` in
+> [`src/main/resources/application.properties`](src/main/resources/application.properties:5) to match.
+
+### Verify the container
+
+```bash
+docker ps --filter name=aitp-pg                       # STATUS should show "Up"
+docker exec aitp-pg psql -U postgres -d aitp -c "SELECT PostGIS_Full_Version();"
+docker exec aitp-pg psql -U postgres -d aitp -c "SELECT current_database(), current_user;"
+```
+
+The `poi` table and the PostGIS extensions are created automatically by Flyway the first time the app
+starts (`./mvnw spring-boot:run`).
+
+### Day-to-day management
+
+```bash
+docker start aitp-pg        # start the container (e.g. after a reboot / `docker stop`)
+docker stop aitp-pg         # stop it
+docker logs -f aitp-pg      # tail container logs
+```
+
+### Reset / recreate from scratch
+
+```bash
+docker stop aitp-pg
+docker rm aitp-pg                    # remove the container only (named volume keeps the data)
+docker volume rm aitp-pg-data        # ALSO delete all data — only if you want a clean slate
+# then re-run the `docker run` command from "Create the container" above
+```
+
+> Keeping data in the named volume `aitp-pg-data` means you can `docker rm` / `docker run` the container
+> freely (e.g. to upgrade the image tag) without losing your imported POIs.
 
 ---
 
 ## Running
-
-docker start aitp-pg
-
-docker exec aitp-pg psql -U postgres -d aitp -c "SELECT COUNT(*) AS total_pois, COUNT(*) FILTER (WHERE 'wikipedia' =
-ANY(data_sources)) AS wikipedia_enriched, COUNT(*) FILTER (WHERE 'wikipedia' != ALL(data_sources)) AS not_yet_enriched
-FROM poi;"
-
-## Dump db :
-
-docker exec -t aitp-pg pg_dump -U postgres -d aitp -Fc -f /tmp/db_dump.dump
-docker cp aitp-pg:/tmp/db_dump.dump ./db_dump.dump
 
 ```bash
 # Build
@@ -59,6 +114,21 @@ docker cp aitp-pg:/tmp/db_dump.dump ./db_dump.dump
 
 # Trigger a one-time OSM import (needs the .pbf file in data/)
 ./mvnw spring-boot:run -Dspring-boot.run.jvmArguments="-Dspring.batch.job.enabled=true"
+```
+
+Sanity-check the imported data:
+
+```bash
+docker exec aitp-pg psql -U postgres -d aitp -c "SELECT COUNT(*) AS total_pois, COUNT(*) FILTER (WHERE 'wikipedia' =
+ANY(data_sources)) AS wikipedia_enriched, COUNT(*) FILTER (WHERE 'wikipedia' != ALL(data_sources)) AS not_yet_enriched
+FROM poi;"
+```
+
+## Dump the database
+
+```bash
+docker exec -t aitp-pg pg_dump -U postgres -d aitp -Fc -f /tmp/db_dump.dump
+docker cp aitp-pg:/tmp/db_dump.dump ./db_dump.dump
 ```
 
 ---
