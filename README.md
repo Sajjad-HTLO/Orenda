@@ -1,23 +1,29 @@
 # Orenda — AI Travel Planner (Turkey)
 
-A backend "Travel Operating System" for Turkey, built with Spring Boot 4. It ingests OpenStreetMap POI data, exposes a
+A "Travel Operating System" for Turkey, built with Spring Boot 4. It ingests OpenStreetMap POI data, exposes a
 spatial search API, and integrates free third-party services for weather and routing.
+
+**Mobile apps (iOS + Android)** are built with **Flutter** — one Dart codebase compiled to both platforms, talking to
+this backend over REST.
 
 ---
 
 ## What's built
 
-| Area             | Status | Details                                                                                                    |
-|------------------|--------|------------------------------------------------------------------------------------------------------------|
-| OSM POI importer | Done   | Spring Batch job reads `turkey-tourist.osm.pbf` (~43 K tourist POIs) and bulk-inserts into PostGIS         |
-| POI search API   | Done   | Nearby search (radius + category), full-text search, single-POI lookup, category listing                   |
-| Weather API      | Done   | Current conditions + 7-day forecast via Open-Meteo (free, no key)                                          |
-| Routing API      | Done   | Point-to-point routing via OSRM public server (free, no key); returns distance, duration, GeoJSON geometry |
-| POI feedback     | Done   | Users report closed/inaccurate/moved POIs → data updates immediately + an alternative POI is suggested     |
+| Area             | Status  | Details                                                                                                    |
+|------------------|---------|------------------------------------------------------------------------------------------------------------|
+| OSM POI importer | Done    | Spring Batch job reads `turkey-tourist.osm.pbf` (~43 K tourist POIs) and bulk-inserts into PostGIS         |
+| POI search API   | Done    | Nearby search (radius + category), full-text search, single-POI lookup, category listing                   |
+| Weather API      | Done    | Current conditions + 7-day forecast via Open-Meteo (free, no key)                                          |
+| Routing API      | Done    | Point-to-point routing via OSRM public server (free, no key); returns distance, duration, GeoJSON geometry |
+| POI feedback     | Done    | Users report closed/inaccurate/moved POIs → data updates immediately + an alternative POI is suggested     |
+| Mobile app       | Planned | iOS + Android apps in **Flutter** (single Dart codebase) — roadmap in [`MILESTONES.md`](MILESTONES.md)     |
 
 ---
 
 ## Tech stack
+
+### Backend
 
 - **Java 21**, **Spring Boot 4.0.6**
 - **Spring Batch** — OSM import pipeline
@@ -27,6 +33,14 @@ spatial search API, and integrates free third-party services for weather and rou
 - **Flyway** — schema migrations
 - **osm4j** — `.osm.pbf` parsing
 - **Jackson** — JSON / JSONB serialization
+
+### Mobile (planned)
+
+- **Flutter** (Dart) — single codebase for **iOS + Android**
+- **dio / retrofit** — REST client for this backend
+- **Riverpod or BLoC** — state management
+- **flutter_map** — map display for POIs and routes
+- **dart_openai / langchain_dart** — AI assistant features
 
 ---
 
@@ -279,6 +293,23 @@ poi_source_data (per-source field tracking)
 ```
 
 Full migration: `src/main/resources/db/migration/V1__create_poi_schema.sql`
+
+---
+
+## Mobile apps (Flutter)
+
+**Decision (Aug 2026):** Flutter was chosen over React Native and Kotlin Multiplatform for 100% code sharing across
+iOS + Android, native performance, and clean Dart syntax that suits AI-agent-assisted development.
+
+The mobile apps talk to this backend over REST and will expose:
+
+- **POI search & discovery** — nearby (radius + category), full-text (TR/EN), detail view with map
+- **Weather** — current conditions + forecast for any POI location
+- **Routing** — point-to-point routes (driving / foot / bike) with GeoJSON rendered on the map
+- **AI assistant** — natural-language search, recommendations, and itinerary planning
+
+Planned structure, dependencies, API contract, and the phased roadmap (Setup → POIs → Weather → Routing → AI →
+Advanced → Polish/Release) live in [`MILESTONES.md`](MILESTONES.md).
 
 ---
 
