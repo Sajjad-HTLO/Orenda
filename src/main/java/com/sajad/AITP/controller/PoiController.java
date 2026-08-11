@@ -1,7 +1,12 @@
 package com.sajad.AITP.controller;
 
+import com.sajad.AITP.exception.PoiNotFoundException;
+import com.sajad.AITP.model.FeedbackRequest;
+import com.sajad.AITP.model.FeedbackResponse;
 import com.sajad.AITP.model.PoiResponse;
 import com.sajad.AITP.repository.PoiRepository;
+import com.sajad.AITP.service.PoiFeedbackService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -18,6 +23,7 @@ public class PoiController {
     private static final double MAX_RADIUS = 50.0; // km
 
     private final PoiRepository poiRepository;
+    private final PoiFeedbackService poiFeedbackService;
 
     /**
      * POIs within a radius, optionally filtered by category.
@@ -71,5 +77,20 @@ public class PoiController {
     @GetMapping("/categories")
     public List<Map<String, Object>> categories() {
         return poiRepository.findCategories();
+    }
+
+    /**
+     * Immediate user feedback for a suggested POI (closed, inaccurate, moved,
+     * duplicate, other). Updates the POI data right away and returns the nearest
+     * alternative POI to suggest instead.
+     * POST /api/pois/feedback
+     */
+    @PostMapping("/feedback")
+    public ResponseEntity<FeedbackResponse> feedback(@Valid @RequestBody FeedbackRequest request) {
+        try {
+            return ResponseEntity.ok(poiFeedbackService.process(request));
+        } catch (PoiNotFoundException e) {
+            return ResponseEntity.notFound().build();
+        }
     }
 }

@@ -13,6 +13,7 @@ spatial search API, and integrates free third-party services for weather and rou
 | POI search API   | Done   | Nearby search (radius + category), full-text search, single-POI lookup, category listing                   |
 | Weather API      | Done   | Current conditions + 7-day forecast via Open-Meteo (free, no key)                                          |
 | Routing API      | Done   | Point-to-point routing via OSRM public server (free, no key); returns distance, duration, GeoJSON geometry |
+| POI feedback     | Done   | Users report closed/inaccurate/moved POIs → data updates immediately + an alternative POI is suggested     |
 
 ---
 
@@ -143,6 +144,60 @@ GET /api/pois/{id}
 GET /api/pois/search?q=topkapi
 GET /api/pois/categories
 ```
+
+> `nearby` and `search` exclude POIs that users have reported as **closed** or **duplicate** (see feedback below).
+> Inaccurate / moved POIs stay in results but are flagged for review.
+
+### POI feedback — immediate user reports
+
+```
+POST /api/pois/feedback
+```
+
+When a suggested POI is closed, wrong, or no longer valid, the user can report it and the app updates the POI data
+immediately, then returns the nearest alternative POI in the same response.
+
+Request body:
+
+```json
+{
+  "poiId": "3f9b2c1a-…-uuid",
+  "type": "CLOSED",
+  "details": "Permanently closed",
+  "sessionId": "optional-client-session-id",
+  "newLat": 41.0052,
+  "newLon": 28.9772
+}
+```
+
+`type` is one of:
+
+| Type         | Effect on the POI                                                                                 |
+|--------------|---------------------------------------------------------------------------------------------------|
+| `CLOSED`     | Marked as closed, score lowered, **excluded** from future results                                 |
+| `DUPLICATE`  | Marked as duplicate, score lowered, **excluded** from future results                              |
+| `INACCURATE` | Flagged `needs_review`, score lowered, still shown                                                |
+| `MOVED`      | Flagged `needs_review`, score lowered, still shown; `newLat`/`newLon` correct the stored location |
+| `OTHER`      | Flagged `needs_review`, score lowered, still shown                                                |
+
+Response:
+
+```json
+{
+  "accepted": true,
+  "message": "Feedback received — POI marked as closed and excluded from future results.",
+  "alternativePoi": {
+    "id": "…",
+    "nameTr": "…",
+    "category": "historic",
+    "lat": 41.011,
+    "lon": 28.972
+  }
+}
+```
+
+`alternativePoi` is the nearest non-excluded POI near the reported one (same category when available) and may be
+`null` when nothing is in range. Status codes: `200` accepted, `400` missing/invalid fields, `404` unknown `poiId`.
 
 ### Weather — Open-Meteo (free, no API key)
 
