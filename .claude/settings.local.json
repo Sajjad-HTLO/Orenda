@@ -30,7 +30,10 @@
       "Bash(curl -s -I \"http://router.project-osrm.org/route/v1/driving/28.9,41.0;32.8,39.9?overview=full&geometries=geojson&steps=false\")",
       "Bash(pkill -f \"spring-boot:run\")",
       "Bash(pkill -f \"AitpApplication\")",
-      "Bash(grep -v \"^\\\\[INFO\\\\]\\\\|^$\\\\|^  \\\\.\" /tmp/aitp-run3.log)"
+      "Bash(grep -v \"^\\\\[INFO\\\\]\\\\|^$\\\\|^  \\\\.\" /tmp/aitp-run3.log)",
+      "Bash(env)",
+      "Bash(./mvnw test *)",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d aitp -tc \"SELECT COUNT\\(*\\) FROM poi;\")"
     ]
   }
 }

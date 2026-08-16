@@ -120,4 +120,11 @@ public class TripPlanRequest {
     @Valid
     @NotNull(message = "style must not be null")
     private TravelStyle style;
+
+    /**
+     * Anonymous traveler identifier. When present, the planner blends in the
+     * traveler's long-term profile and learned preference weights; when absent
+     * it plans purely from this request.
+     */
+    private String sessionId;
 }

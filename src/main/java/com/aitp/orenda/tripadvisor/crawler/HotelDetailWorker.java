@@ -44,16 +44,19 @@ public class HotelDetailWorker {
     private final HotelDetailParser hotelDetailParser;
     private final HotelRepository hotelRepository;
     private final RandomDelay randomDelay;
+    private final CrawlerStopEventLogger stopEventLogger;
 
     public HotelDetailWorker(
             TripadvisorCrawlerProperties properties,
             HotelDetailParser hotelDetailParser,
             HotelRepository hotelRepository,
-            RandomDelay randomDelay) {
+            RandomDelay randomDelay,
+            CrawlerStopEventLogger stopEventLogger) {
         this.properties = properties;
         this.hotelDetailParser = hotelDetailParser;
         this.hotelRepository = hotelRepository;
         this.randomDelay = randomDelay;
+        this.stopEventLogger = stopEventLogger;
     }
 
     /**
@@ -176,6 +179,10 @@ public class HotelDetailWorker {
             if (stillBlocked) {
                 log.error("TRIPADVISOR_HOTEL_DETAIL_BLOCKED tripadvisorId={} url={} reason='DataDome challenge could not be resolved after all retries' title='{}' htmlChars={} snapshotPath={} elapsedMs={}",
                         listing.tripadvisorId(), listing.url(), title, html == null ? 0 : html.length(), snapshotPath, elapsedMs(startedAt));
+                stopEventLogger.record(stopEventLogger.classifyBlockType(html, title), "HOTEL_DETAIL",
+                        listing.url(), "tripadvisorId=" + listing.tripadvisorId(),
+                        "DataDome challenge could not be resolved after all retries",
+                        title, byteSize(html), "POST_RETRIES");
                 return HotelDetailCrawlResult.failure("DataDome challenge could not be resolved after all retries");
             }
 
@@ -194,6 +201,9 @@ public class HotelDetailWorker {
         } catch (Exception e) {
             log.error("TRIPADVISOR_HOTEL_DETAIL_FAILED tripadvisorId={} url={} elapsedMs={} errorType={} error={}",
                     listing.tripadvisorId(), listing.url(), elapsedMs(startedAt), e.getClass().getSimpleName(), e.getMessage(), e);
+            stopEventLogger.record(CrawlerStopEventLogger.TYPE_ERROR, "HOTEL_DETAIL",
+                    listing.url(), "tripadvisorId=" + listing.tripadvisorId(),
+                    e.getClass().getSimpleName() + ": " + e.getMessage(), null, 0, "EXCEPTION");
             return HotelDetailCrawlResult.failure(e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }

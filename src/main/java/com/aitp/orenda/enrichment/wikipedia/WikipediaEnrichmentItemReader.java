@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.aitp.orenda.enrichment.PoiEnrichmentCandidate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.batch.core.annotation.BeforeStep;
 import org.springframework.batch.core.configuration.annotation.StepScope;
+import org.springframework.batch.core.step.StepExecution;
 import org.springframework.batch.infrastructure.item.ItemReader;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -41,6 +43,47 @@ public class WikipediaEnrichmentItemReader implements ItemReader<PoiEnrichmentCa
             LIMIT ?
             """;
 
+    /**
+     * Preference-aware variant: when a {@code sessionId} job parameter is present,
+     * POIs whose category the traveler has learned to love (high
+     * {@code user_preference.weight}) are enriched first. Low-weight categories
+     * sink to the bottom so enrichment effort follows the traveler's interests.
+     */
+    private static final String PREFERENCE_SQL = """
+            SELECT p.id, p.name_tr, p.name_en, p.wikidata_id,
+                   p.category, p.completeness_score, p.attributes::text
+            FROM poi p
+            LEFT JOIN user_preference up
+              ON up.session_id = ?
+             AND up.category = CASE p.category
+                    WHEN 'culture' THEN 'CULTURE'
+                    WHEN 'historic' THEN 'CULTURE'
+                    WHEN 'food_drink' THEN 'FOOD'
+                    WHEN 'shopping' THEN 'SHOPPING'
+                    WHEN 'entertainment' THEN 'NIGHTLIFE'
+                    WHEN 'nature' THEN 'NATURE'
+                    WHEN 'leisure' THEN 'LEISURE'
+                    WHEN 'wellness' THEN 'WELLNESS'
+                    WHEN 'attraction' THEN 'ATTRACTION'
+                    WHEN 'accommodation' THEN 'ACCOMMODATION'
+                    ELSE 'OTHER'
+                END
+            WHERE NOT EXISTS (
+                SELECT 1 FROM poi_source_data psd
+                WHERE psd.poi_id = p.id AND psd.source = 'wikipedia'
+            )
+              AND (p.name_tr <> '' OR p.name_en IS NOT NULL
+                   OR p.wikidata_id IS NOT NULL
+                   OR jsonb_exists(p.attributes, 'wikipedia'))
+              AND mod(abs(hashtext(p.id::text)), ?) = ?
+            ORDER BY
+                COALESCE(up.weight, 0.5) DESC,
+                CASE WHEN jsonb_exists(p.attributes, 'wikipedia') THEN 0 ELSE 1 END,
+                p.completeness_score ASC,
+                p.id
+            LIMIT ?
+            """;
+
     private static final String COUNT_TOTAL = "SELECT count(*) FROM poi";
     private static final String COUNT_WITH_NAME = "SELECT count(*) FROM poi WHERE name_tr <> '' OR name_en IS NOT NULL";
     private static final String COUNT_NOT_ENRICHED = """
@@ -67,7 +110,15 @@ public class WikipediaEnrichmentItemReader implements ItemReader<PoiEnrichmentCa
     @Value("#{stepExecutionContext['partitionCount']}")
     private Integer partitionCount;
 
+    private String sessionId;
+
     private Iterator<PoiEnrichmentCandidate> iterator;
+
+    @BeforeStep
+    public void beforeStep(StepExecution stepExecution) {
+        String s = stepExecution.getJobParameters().getString("sessionId");
+        this.sessionId = (s != null && !s.isBlank()) ? s : null;
+    }
 
     @Override
     public PoiEnrichmentCandidate read() {
@@ -78,9 +129,9 @@ public class WikipediaEnrichmentItemReader implements ItemReader<PoiEnrichmentCa
             return null;
         }
         PoiEnrichmentCandidate candidate = iterator.next();
-        log.info("Enriching POI id={} name_tr=\"{}\" name_en=\"{}\" wikidata_id={} category={} completeness={}",
+        log.info("Enriching POI id={} name_tr=\"{}\" name_en=\"{}\" wikidata_id={} category={} completeness={} sessionId={}",
                 candidate.getId(), candidate.getNameTr(), candidate.getNameEn(),
-                candidate.getWikidataId(), candidate.getCategory(), candidate.getCompletenessScore());
+                candidate.getWikidataId(), candidate.getCategory(), candidate.getCompletenessScore(), sessionId);
         return candidate;
     }
 
@@ -98,20 +149,31 @@ public class WikipediaEnrichmentItemReader implements ItemReader<PoiEnrichmentCa
                     total, withName, notEnriched, eligible);
         }
 
-        List<PoiEnrichmentCandidate> candidates = jdbc.query(SELECT_SQL, (rs, rowNum) -> {
-            Map<String, Object> attributes = parseAttributes(rs.getString("attributes"));
-            return PoiEnrichmentCandidate.builder()
-                    .id(UUID.fromString(rs.getString("id")))
-                    .nameTr(rs.getString("name_tr"))
-                    .nameEn(rs.getString("name_en"))
-                    .wikidataId(rs.getString("wikidata_id"))
-                    .category(rs.getString("category"))
-                    .completenessScore(rs.getShort("completeness_score"))
-                    .attributes(attributes)
-                    .build();
-        }, shards, shard, maxItemsPerRun);
-        log.info("Partition {}/{} loaded {} POI candidates", shard, shards, candidates.size());
+        List<PoiEnrichmentCandidate> candidates;
+        if (sessionId != null) {
+            candidates = jdbc.query(PREFERENCE_SQL, (rs, rowNum) -> mapRow(rs),
+                    sessionId, shards, shard, maxItemsPerRun);
+            log.info("Partition {}/{} loaded {} POI candidates (preference-prioritized, sessionId={})",
+                    shard, shards, candidates.size(), sessionId);
+        } else {
+            candidates = jdbc.query(SELECT_SQL, (rs, rowNum) -> mapRow(rs),
+                    shards, shard, maxItemsPerRun);
+            log.info("Partition {}/{} loaded {} POI candidates", shard, shards, candidates.size());
+        }
         return candidates;
+    }
+
+    private PoiEnrichmentCandidate mapRow(java.sql.ResultSet rs) throws java.sql.SQLException {
+        Map<String, Object> attributes = parseAttributes(rs.getString("attributes"));
+        return PoiEnrichmentCandidate.builder()
+                .id(UUID.fromString(rs.getString("id")))
+                .nameTr(rs.getString("name_tr"))
+                .nameEn(rs.getString("name_en"))
+                .wikidataId(rs.getString("wikidata_id"))
+                .category(rs.getString("category"))
+                .completenessScore(rs.getShort("completeness_score"))
+                .attributes(attributes)
+                .build();
     }
 
     private Map<String, Object> parseAttributes(String json) {

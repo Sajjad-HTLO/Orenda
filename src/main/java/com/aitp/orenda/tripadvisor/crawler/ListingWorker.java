@@ -42,6 +42,7 @@ public class ListingWorker {
     private final HotelRepository hotelRepository;
     private final PageRepository pageRepository;
     private final RandomDelay randomDelay;
+    private final CrawlerStopEventLogger stopEventLogger;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ListingWorker(
@@ -49,12 +50,14 @@ public class ListingWorker {
             ListingParser listingParser,
             HotelRepository hotelRepository,
             PageRepository pageRepository,
-            RandomDelay randomDelay) {
+            RandomDelay randomDelay,
+            CrawlerStopEventLogger stopEventLogger) {
         this.properties = properties;
         this.listingParser = listingParser;
         this.hotelRepository = hotelRepository;
         this.pageRepository = pageRepository;
         this.randomDelay = randomDelay;
+        this.stopEventLogger = stopEventLogger;
     }
 
     public ListingCrawlResult crawl(CrawlPage crawlPage) {
@@ -214,6 +217,10 @@ public class ListingWorker {
             if (stillBlocked) {
                 log.error("TRIPADVISOR_BLOCKED url={} offset={} reason='DataDome challenge could not be resolved after all retries. Consider: (1) running headed mode, (2) using residential proxy, (3) increasing delays.' elapsedMs={}",
                         crawlPage.url(), crawlPage.offset(), elapsedMs(startedAt));
+                String blockType = stopEventLogger.classifyBlockType(html, title);
+                stopEventLogger.record(blockType, "LISTING", crawlPage.url(), "offset=" + crawlPage.offset(),
+                        "DataDome challenge could not be resolved after all retries",
+                        title, htmlBytes, "POST_RETRIES");
                 if (!properties.singlePageOnly()) {
                     pageRepository.markFailed(crawlPage.offset(), crawlPage.url(),
                             new RuntimeException("DataDome challenge could not be resolved"));
@@ -259,6 +266,8 @@ public class ListingWorker {
             }
             log.error("TRIPADVISOR_FAILED url={} offset={} elapsedMs={} error={}",
                     crawlPage.url(), crawlPage.offset(), elapsedMs(startedAt), e.getMessage(), e);
+            stopEventLogger.record(CrawlerStopEventLogger.TYPE_ERROR, "LISTING", crawlPage.url(),
+                    "offset=" + crawlPage.offset(), e.getMessage(), null, 0, "EXCEPTION");
             return ListingCrawlResult.failed(crawlPage, e);
         }
     }

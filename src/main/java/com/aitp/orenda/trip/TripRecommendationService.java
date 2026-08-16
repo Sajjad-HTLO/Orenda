@@ -1,7 +1,12 @@
 package com.aitp.orenda.trip;
 
 import com.aitp.orenda.model.PoiResponse;
+import com.aitp.orenda.preference.PreferenceCategory;
+import com.aitp.orenda.preference.PreferenceService;
+import com.aitp.orenda.preference.TripConstraints;
 import com.aitp.orenda.repository.PoiRepository;
+import com.aitp.orenda.weather.WeatherResponse;
+import com.aitp.orenda.weather.WeatherService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -12,16 +17,28 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Scores and ranks POIs based on the trip-planning questionnaire. The algorithm:
+ * End-to-end trip planner implementing the full pipeline:
+ * <pre>
+ * Candidate POIs → Filter → Score → Opening hours → Weather → Travel time
+ *   → Walking constraints → Budget → Optimization → AI-generated itinerary
+ * </pre>
  * <ul>
- *   <li>Expands the search area around the accommodation location.</li>
- *   <li>Filters by interest–category mapping.</li>
- *   <li>Applies weighted scoring: interest match, completeness, proximity, budget fit,
- *       family suitability, walking tolerance, and mobility.</li>
- *   <li>Returns a ranked list with per-factor breakdown and human-readable reasons.</li>
+ *   <li><b>Candidates/Filter/Score</b> — POIs around the accommodation, filtered by
+ *       data quality and closed-on-every-trip-day, then weighted scoring over the
+ *       interest, completeness, proximity, budget, family, walking, mobility, pace
+ *       and food dimensions.</li>
+ *   <li><b>Opening hours</b> — venues closed for the whole trip are excluded;
+ *       open venues are rewarded.</li>
+ *   <li><b>Weather</b> — rainy trips boost indoor venues, clear trips boost
+ *       outdoor ones.</li>
+ *   <li><b>Travel time</b> — real routing time from the base is scored, so "close
+ *       in kilometres but slow to reach" POIs are penalised.</li>
+ *   <li><b>Walking constraints / Budget / Optimization</b> — handed to
+ *       {@link ItineraryOptimizer}, which enforces daily walking and travel budgets,
+ *       ordering and times.</li>
  * </ul>
- * No external LLM calls — pure rule-based scoring that is fast, deterministic, and
- * transparent. The optional "surprise me" mode adds mild randomization.
+ * No external LLM is used — the itinerary is deterministic and transparent, with
+ * human-readable reasons per POI and per day.
  */
 @Service
 @RequiredArgsConstructor
@@ -29,6 +46,11 @@ import java.util.stream.Collectors;
 public class TripRecommendationService {
 
     private final PoiRepository poiRepository;
+    private final WeatherService weatherService;
+    private final TravelTimeEstimator travelTimeEstimator;
+    private final ItineraryOptimizer itineraryOptimizer;
+    private final PreferenceService preferenceService;
+    private final ItineraryNarrator itineraryNarrator;
 
     /**
      * Default search radius (km) around the accommodation. Can be expanded if needed.
@@ -42,13 +64,22 @@ public class TripRecommendationService {
     private static final int MIN_COMPLETENESS = 20;
 
     /**
-     * Maximum POIs to score and return per request.
+     * Maximum POIs to fetch and score per request.
      */
     private static final int MAX_CANDIDATES = 200;
+
+    /**
+     * Top POIs that get real routing travel-time computed (cheap for a handful).
+     */
+    private static final int ROUTED_CANDIDATES = 25;
+
+    /**
+     * Maximum POIs returned in the final suggestion list.
+     */
     private static final int DEFAULT_LIMIT = 20;
 
     /**
-     * Main entry point: score POIs around the accommodation and return a ranked plan.
+     * Main entry point: runs the full planning pipeline and returns the ranked plan.
      */
     public TripPlanResponse recommend(TripPlanRequest req) {
         // 1. Determine search centre and radius
@@ -60,44 +91,136 @@ public class TripRecommendationService {
         // 2. Determine number of days
         long days = ChronoUnit.DAYS.between(req.getBasics().getStartDate(), req.getBasics().getEndDate()) + 1;
         int tripDays = Math.max(1, (int) days);
+        LocalDate startDate = req.getBasics().getStartDate();
 
-        // 3. Fetch candidate POIs (broad, then filter in Java for flexibility)
+        // 3. Weather context (graceful: empty when forecast unavailable)
+        TripWeather weather = buildWeather(lat, lon, tripDays);
+
+        // 3b. Learned preferences + long-term profile + feedback constraints
+        String sessionId = req.getSessionId();
+        Map<String, Double> prefWeights = preferenceService.loadWeights(sessionId);
+        TripConstraints constraints = preferenceService.loadConstraints(sessionId);
+        List<TripEnums.Interest> interests = resolveInterests(req, sessionId);
+
+        // Constraints shape the search before scoring:
+        // "too far" shrinks the radius; "too expensive" caps the budget.
+        radiusKm = effectiveRadius(radiusKm, constraints);
+        TripEnums.Budget effectiveBudget = effectiveBudget(req.getStyle().getBudget(), constraints);
+
+        // 4. Candidate POIs → filter → score (cheap dimensions, incl. opening hours + weather)
         List<PoiResponse> candidates = new ArrayList<>(
                 poiRepository.findNearby(lat, lon, radiusKm, null, 0, MAX_CANDIDATES));
         candidates.removeIf(p -> p.getCompletenessScore() < MIN_COMPLETENESS);
 
-        // 4. Score every candidate
         List<TripPlanResponse.ScoredPoi> scored = candidates.stream()
-                .map(p -> scorePoi(p, req))
+                .map(p -> scorePoi(p, req, weather, startDate, tripDays, interests, prefWeights,
+                        constraints, effectiveBudget))
                 .filter(s -> s.getScore() > 0)
+                .sorted(Comparator.comparingDouble(TripPlanResponse.ScoredPoi::getScore).reversed())
+                .limit(ROUTED_CANDIDATES)
+                .toList();
+
+        // 5. Travel-time stage for the top candidates (from the base location)
+        List<TripPlanResponse.ScoredPoi> withTravel = scored.stream()
+                .map(s -> applyTravelTime(s, req, lat, lon))
                 .sorted(Comparator.comparingDouble(TripPlanResponse.ScoredPoi::getScore).reversed())
                 .limit(DEFAULT_LIMIT)
                 .toList();
 
-        // 5. Build day plan if requested
-        List<TripPlanResponse.DayPlan> dayPlan = buildDayPlan(scored, req, tripDays, lat, lon);
+        // 6. Optimization → ordered, timed day-by-day itinerary
+        List<TripPlanResponse.DayPlan> dayPlan = itineraryOptimizer.build(
+                withTravel, req, tripDays, lat, lon, weather);
 
-        // 6. Generate summary and notes
-        String summary = generateSummary(scored, req, tripDays);
-        List<String> notes = generateNotes(scored, req);
+        // 7. Summary and notes
+        String summary = generateSummary(withTravel, req, tripDays);
+        List<String> notes = generateNotes(withTravel, req, weather, tripDays, constraints);
+        String weatherSummary = generateWeatherSummary(weather, startDate, tripDays);
+        String preferenceInsight = preferenceService.insightFor(prefWeights);
+
+        // 8. AI-generated itinerary narrative (natural-language reasoning layer)
+        ItineraryNarrator.NarrativeOutput narrative = itineraryNarrator.narrate(req, dayPlan, withTravel,
+                preferenceInsight, weatherSummary, constraints, effectiveBudget, radiusKm);
+        List<TripPlanResponse.DayPlan> narratedPlan = applyDayNarratives(dayPlan, narrative.dayNarratives());
 
         return TripPlanResponse.builder()
                 .tripDays(tripDays)
                 .summary(summary)
-                .suggestions(scored)
-                .dayPlan(dayPlan)
+                .suggestions(withTravel)
+                .dayPlan(narratedPlan)
                 .notes(notes)
+                .weatherSummary(weatherSummary)
+                .preferenceInsight(preferenceInsight)
+                .narrative(narrative.overall())
                 .build();
+    }
+
+    private List<TripPlanResponse.DayPlan> applyDayNarratives(List<TripPlanResponse.DayPlan> dayPlan,
+                                                              List<String> dayNarratives) {
+        if (dayPlan.isEmpty()) {
+            return dayPlan;
+        }
+        List<TripPlanResponse.DayPlan> narrated = new ArrayList<>(dayPlan.size());
+        for (int i = 0; i < dayPlan.size(); i++) {
+            TripPlanResponse.DayPlan day = dayPlan.get(i);
+            narrated.add(TripPlanResponse.DayPlan.builder()
+                    .day(day.getDay())
+                    .date(day.getDate())
+                    .weather(day.getWeather())
+                    .items(day.getItems())
+                    .notes(day.getNotes())
+                    .narrative(i < dayNarratives.size() ? dayNarratives.get(i) : null)
+                    .build());
+        }
+        return narrated;
+    }
+
+    /* ────────────────── Weather context ────────────────── */
+
+    private TripWeather buildWeather(double lat, double lon, int tripDays) {
+        if (tripDays <= 0) {
+            return TripWeather.empty();
+        }
+        try {
+            WeatherResponse resp = weatherService.getWeather(lat, lon, Math.min(tripDays, 16));
+            if (resp == null || resp.daily() == null || resp.daily().isEmpty()) {
+                return TripWeather.empty();
+            }
+            return new TripWeather(resp.daily());
+        } catch (Exception e) {
+            log.warn("Weather forecast unavailable; proceeding without weather adjustments. error={}",
+                    e.getMessage());
+            return TripWeather.empty();
+        }
+    }
+
+    private String generateWeatherSummary(TripWeather weather, LocalDate startDate, int tripDays) {
+        if (weather == null || weather.days() == null || weather.days().isEmpty()) {
+            return "";
+        }
+        List<String> parts = new ArrayList<>();
+        for (int i = 0; i < tripDays; i++) {
+            String date = startDate.plusDays(i).toString();
+            if (weather.byDate(date).isPresent()) {
+                parts.add(startDate.plusDays(i).getMonth().name().substring(0, 3) + " "
+                        + startDate.plusDays(i).getDayOfMonth() + ": " + weather.description(date));
+            }
+        }
+        return String.join(" · ", parts);
     }
 
     /* ────────────────── Scoring ────────────────── */
 
-    private TripPlanResponse.ScoredPoi scorePoi(PoiResponse poi, TripPlanRequest req) {
+    private TripPlanResponse.ScoredPoi scorePoi(PoiResponse poi, TripPlanRequest req,
+                                                TripWeather weather, LocalDate startDate, int tripDays,
+                                                List<TripEnums.Interest> interests,
+                                                Map<String, Double> prefWeights,
+                                                TripConstraints constraints,
+                                                TripEnums.Budget effectiveBudget) {
         Map<String, Double> factors = new LinkedHashMap<>();
         List<String> reasons = new ArrayList<>();
 
         // a) Interest–category match (strongest signal)
-        double interestScore = scoreInterestMatch(poi, req.getInterests().getSelectedInterests(), reasons);
+        double interestScore = scoreInterestMatch(poi, interests, reasons);
         factors.put("interest_match", interestScore);
 
         // b) Completeness / data quality
@@ -110,7 +233,7 @@ public class TripRecommendationService {
         factors.put("proximity", proximityScore);
 
         // d) Budget fit (price signals live in attributes if available)
-        double budgetScore = scoreBudgetFit(poi, req.getStyle().getBudget(), reasons);
+        double budgetScore = scoreBudgetFit(poi, effectiveBudget, reasons);
         factors.put("budget_fit", budgetScore);
 
         // e) Family suitability
@@ -125,28 +248,69 @@ public class TripRecommendationService {
         double mobilityScore = scoreMobility(poi, req.getProfile().getMobilityLimitation(), reasons);
         factors.put("mobility", mobilityScore);
 
-        // h) Pace preference (packed vs relaxed affects how many POIs per day)
+        // h) Pace preference
         double paceScore = scorePace(poi, req.getStyle().getPace(), reasons);
         factors.put("pace", paceScore);
 
-        // i) Food preference (restaurant subcategories etc.)
+        // i) Food preference
         double foodScore = scoreFood(poi, req.getStyle().getFood(), reasons);
         factors.put("food", foodScore);
 
-        // j) "Surprise me" adds mild noise so repeat requests differ
+        // j) Opening hours stage — closed for the whole trip means filtered out
+        boolean closedAllTrip = closedAllTrip(poi, startDate, tripDays);
+        if (closedAllTrip) {
+            reasons.add("Closed on all of your trip dates");
+            return TripPlanResponse.ScoredPoi.builder()
+                    .poi(poi)
+                    .score(0)
+                    .factors(factors)
+                    .reasons(reasons)
+                    .build();
+        }
+        double openingScore = openDuringTrip(poi, startDate, tripDays, reasons);
+        factors.put("opening_hours", openingScore);
+
+        // k) Weather stage — indoor on rainy trips, outdoor on clear trips
+        double weatherScore = scoreWeather(poi, weather, startDate, tripDays, reasons);
+        factors.put("weather", weatherScore);
+
+        // l) Learned preference weights (from feedback) — boosts what this
+        //    traveler demonstrably enjoys, suppresses what they avoid
+        double preferenceScore = scoreLearnedPreference(poi, prefWeights, reasons);
+        factors.put("preference", preferenceScore);
+
+        // m) Feedback-reason constraints — "not suitable for kids" excludes
+        //    adult-oriented venues outright; crowd/quiet/budget shape the score
+        if (constraints.familySafe() && isAdultOriented(poi)) {
+            reasons.add("Excluded — adult-oriented venue");
+            return TripPlanResponse.ScoredPoi.builder()
+                    .poi(poi)
+                    .score(0)
+                    .factors(factors)
+                    .reasons(reasons)
+                    .build();
+        }
+        double constraintScore = scoreConstraints(poi, constraints, reasons);
+        factors.put("constraints", constraintScore);
+
+        // n) "Surprise me" adds mild noise so repeat requests differ
         double surprise = req.getStyle().getPlanningStyle() == TripEnums.PlanningStyle.SURPRISE_ME ? randomFactor() : 0;
         factors.put("surprise", surprise);
 
         // Weighted total (sum of weights = 100)
-        double total = interestScore * 0.35
-                + completenessScore * 0.08
-                + proximityScore * 0.10
+        double total = interestScore * 0.27
+                + completenessScore * 0.07
+                + proximityScore * 0.08
                 + budgetScore * 0.10
-                + familyScore * 0.08
+                + familyScore * 0.07
                 + walkingScore * 0.07
-                + mobilityScore * 0.07
-                + paceScore * 0.08
+                + mobilityScore * 0.06
+                + paceScore * 0.07
                 + foodScore * 0.05
+                + openingScore * 0.06
+                + weatherScore * 0.06
+                + preferenceScore * 0.06
+                + constraintScore * 0.05
                 + surprise;
 
         if (total <= 5) { // noise floor
@@ -166,7 +330,268 @@ public class TripRecommendationService {
                 .build();
     }
 
-    /* ────────────────── Individual scoring dimensions ────────────────── */
+    /**
+     * Travel-time stage: computes the real routed time from the base to the POI
+     * and folds it into the score as an extra factor (max 10 points).
+     */
+    private TripPlanResponse.ScoredPoi applyTravelTime(TripPlanResponse.ScoredPoi scored,
+                                                       TripPlanRequest req, double baseLat, double baseLon) {
+        TripEnums.TransportMode mode = req.getBasics().getTransportMode();
+        double travelMinutes = travelTimeEstimator.minutesBetween(
+                baseLat, baseLon, scored.getPoi().getLat(), scored.getPoi().getLon(), mode);
+        double travelFactor = Math.max(0, 10 - travelMinutes / 8.0);
+
+        Map<String, Double> factors = new LinkedHashMap<>(scored.getFactors());
+        factors.put("travel_time", Math.round(travelFactor * 100.0) / 100.0);
+
+        List<String> reasons = new ArrayList<>(scored.getReasons());
+        reasons.add("%d min from your base".formatted(Math.round(travelMinutes)));
+
+        return TripPlanResponse.ScoredPoi.builder()
+                .poi(scored.getPoi())
+                .score(Math.round((scored.getScore() + travelFactor) * 100.0) / 100.0)
+                .factors(factors)
+                .reasons(reasons)
+                .build();
+    }
+
+    /* ────────────────── Opening hours scoring ────────────────── */
+
+    private OpeningHoursEvaluator.OpeningStatus statusOnDate(PoiResponse poi, LocalDate date) {
+        Object raw = poi.getAttributes() == null ? null : poi.getAttributes().get("opening_hours");
+        if (raw == null) {
+            return OpeningHoursEvaluator.OpeningStatus.UNKNOWN;
+        }
+        return OpeningHoursEvaluator.evaluate(String.valueOf(raw), date, 14);
+    }
+
+    private boolean closedAllTrip(PoiResponse poi, LocalDate startDate, int tripDays) {
+        boolean anyOpen = false;
+        boolean anyClosed = false;
+        for (int i = 0; i < tripDays; i++) {
+            OpeningHoursEvaluator.OpeningStatus status = statusOnDate(poi, startDate.plusDays(i));
+            if (status == OpeningHoursEvaluator.OpeningStatus.OPEN) {
+                anyOpen = true;
+            } else if (status == OpeningHoursEvaluator.OpeningStatus.CLOSED) {
+                anyClosed = true;
+            }
+        }
+        return anyClosed && !anyOpen; // all known days closed; all-unknown → keep
+    }
+
+    private double openDuringTrip(PoiResponse poi, LocalDate startDate, int tripDays, List<String> reasons) {
+        boolean anyOpen = false;
+        for (int i = 0; i < tripDays; i++) {
+            if (statusOnDate(poi, startDate.plusDays(i)) == OpeningHoursEvaluator.OpeningStatus.OPEN) {
+                anyOpen = true;
+                break;
+            }
+        }
+        if (anyOpen) {
+            reasons.add("Open during your trip");
+            return 10;
+        }
+        return 5; // opening hours unknown → neutral
+    }
+
+    /* ────────────────── Weather scoring ────────────────── */
+
+    private double scoreWeather(PoiResponse poi, TripWeather weather, LocalDate startDate,
+                                int tripDays, List<String> reasons) {
+        if (weather == null || weather.days() == null || weather.days().isEmpty()) {
+            return 5;
+        }
+        int rainyDays = 0;
+        int clearDays = 0;
+        for (int i = 0; i < tripDays; i++) {
+            String date = startDate.plusDays(i).toString();
+            if (weather.byDate(date).isEmpty()) {
+                continue; // no forecast for this day — stay neutral
+            }
+            if (weather.isRainy(date)) {
+                rainyDays++;
+            }
+            if (weather.isOutdoorGood(date)) {
+                clearDays++;
+            }
+        }
+        boolean indoor = TripWeather.isIndoor(poi);
+        boolean outdoor = TripWeather.isOutdoor(poi);
+        double rainyFraction = tripDays == 0 ? 0 : (double) rainyDays / tripDays;
+
+        if (rainyFraction >= 0.4) {
+            if (indoor) {
+                reasons.add("Mostly indoor — well suited to the rainy forecast");
+                return 10;
+            }
+            if (outdoor) {
+                reasons.add("Outdoor venue during rainy days — consider a backup plan");
+                return 2;
+            }
+            return 5;
+        }
+        if (clearDays > rainyDays) {
+            if (outdoor) {
+                reasons.add("Clear conditions during your trip — great for outdoor spots");
+                return 10;
+            }
+            return 5;
+        }
+        return 5;
+    }
+
+    /* ────────────────── Learned preference scoring ────────────────── */
+
+    /**
+     * Scores a POI against the traveler's learned preference weights. Unknown
+     * categories and sessions with no feedback stay at a neutral 0.5.
+     */
+    private double scoreLearnedPreference(PoiResponse poi, Map<String, Double> prefWeights,
+                                          List<String> reasons) {
+        if (prefWeights == null || prefWeights.isEmpty()) {
+            return 5;
+        }
+        PreferenceCategory category = PreferenceCategory.forPoi(poi);
+        if (category == PreferenceCategory.OTHER) {
+            return 5;
+        }
+        Double weight = prefWeights.get(category.name());
+        if (weight == null) {
+            return 5;
+        }
+        if (weight >= 0.8) {
+            reasons.add("Matches your learned love of " + category.label());
+        } else if (weight <= 0.2) {
+            reasons.add("Usually not your style");
+        }
+        return 10 * (0.3 + 0.7 * weight); // 3..10
+    }
+
+    /**
+     * Uses the trip's selected interests; when none are given (or the list is
+     * empty), falls back to the traveler's long-term onboarding interests.
+     */
+    private List<TripEnums.Interest> resolveInterests(TripPlanRequest req, String sessionId) {
+        List<TripEnums.Interest> requested = req.getInterests().getSelectedInterests();
+        if (requested != null && !requested.isEmpty()) {
+            return requested;
+        }
+        if (sessionId == null || sessionId.isBlank()) {
+            return requested == null ? List.of() : requested;
+        }
+        try {
+            List<TripEnums.Interest> profile = preferenceService.loadProfileInterests(sessionId);
+            return profile == null ? List.of() : profile;
+        } catch (Exception e) {
+            log.warn("Failed to load traveler profile interests for session {}: {}", sessionId, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /* ────────────────── Feedback-reason constraint scoring ────────────────── */
+
+    /**
+     * Scores a POI against learned feedback constraints. Starts neutral (10) and
+     * adjusts for crowd, quiet and family preferences.
+     */
+    private double scoreConstraints(PoiResponse poi, TripConstraints constraints, List<String> reasons) {
+        double score = 10;
+        if (constraints.avoidCrowded() && isPopular(poi)) {
+            score -= 6;
+            reasons.add("Popular and often crowded — de-prioritized for you");
+        }
+        if (constraints.quiet()) {
+            if (isLoud(poi)) {
+                score -= 6;
+                reasons.add("Lively venue — you've said you prefer quieter places");
+            } else if (isQuiet(poi)) {
+                score += 3;
+                reasons.add("Quiet spot — matches your preference");
+            }
+        }
+        return Math.max(0, score);
+    }
+
+    private boolean isAdultOriented(PoiResponse poi) {
+        String sub = poi.getSubcategory() == null ? "" : poi.getSubcategory();
+        if (List.of("nightclub", "casino", "bar", "pub", "strip_club").contains(sub)) {
+            return true;
+        }
+        Object adultsOnly = poi.getAttributes() == null ? null : poi.getAttributes().get("adults_only");
+        if ("yes".equals(adultsOnly)) {
+            return true;
+        }
+        Object minAge = poi.getAttributes() == null ? null : poi.getAttributes().get("min_age");
+        if (minAge != null) {
+            try {
+                return Integer.parseInt(String.valueOf(minAge)) >= 18;
+            } catch (NumberFormatException ignored) {
+                // not a number — ignore
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Popularity proxy: Tripadvisor review counts live in attributes
+     * ({@code review_count}) when the crawler has enriched the POI.
+     */
+    private boolean isPopular(PoiResponse poi) {
+        Object count = poi.getAttributes() == null ? null : poi.getAttributes().get("review_count");
+        if (count == null) {
+            return false;
+        }
+        try {
+            return Double.parseDouble(String.valueOf(count)) > 2000;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private boolean isLoud(PoiResponse poi) {
+        String sub = poi.getSubcategory() == null ? "" : poi.getSubcategory();
+        String cat = poi.getCategory() == null ? "" : poi.getCategory();
+        return "entertainment".equals(cat)
+                || List.of("nightclub", "casino", "bar", "pub", "theme_park", "water_park", "stadium", "sports_centre").contains(sub);
+    }
+
+    private boolean isQuiet(PoiResponse poi) {
+        String sub = poi.getSubcategory() == null ? "" : poi.getSubcategory();
+        return List.of("park", "garden", "nature_reserve", "viewpoint", "beach", "cafe", "library", "memorial").contains(sub);
+    }
+
+    /**
+     * "Too far" feedback caps the search radius.
+     */
+    private double effectiveRadius(double baseRadiusKm, TripConstraints constraints) {
+        if (constraints.maxRadiusKm() == null) {
+            return baseRadiusKm;
+        }
+        return Math.min(baseRadiusKm, constraints.maxRadiusKm());
+    }
+
+    /**
+     * "Too expensive" feedback caps the effective budget used in scoring.
+     */
+    private TripEnums.Budget effectiveBudget(TripEnums.Budget requested, TripConstraints constraints) {
+        if (constraints.budgetCap() == null) {
+            return requested;
+        }
+        int requestedRank = budgetRank(requested);
+        int capRank = budgetRank(constraints.budgetCap());
+        return requestedRank <= capRank ? requested : constraints.budgetCap();
+    }
+
+    private static int budgetRank(TripEnums.Budget budget) {
+        return switch (budget) {
+            case BUDGET -> 0;
+            case MID_RANGE -> 1;
+            case PREMIUM -> 2;
+            case LUXURY -> 3;
+        };
+    }
+
+    /* ────────────────── Individual scoring dimensions (unchanged) ────────────────── */
 
     private double scoreInterestMatch(PoiResponse poi, List<TripEnums.Interest> interests, List<String> reasons) {
         if (interests == null || interests.isEmpty()) return 25; // neutral baseline
@@ -236,7 +661,6 @@ public class TripRecommendationService {
         if (attrs == null) return 10; // neutral
 
         // Look for price level indicators in OSM tags
-        // Note: OSM rarely has explicit price tags; we infer from type
         String category = poi.getCategory();
         String subcategory = poi.getSubcategory();
 
@@ -492,39 +916,6 @@ public class TripRecommendationService {
         };
     }
 
-    private List<TripPlanResponse.DayPlan> buildDayPlan(List<TripPlanResponse.ScoredPoi> scored,
-                                                        TripPlanRequest req, int days,
-                                                        double lat, double lon) {
-        if (req.getStyle().getPlanningStyle() == TripEnums.PlanningStyle.RECOMMENDATIONS_ONLY) {
-            return Collections.emptyList();
-        }
-
-        // Distribute POIs across days based on pace
-        int poisPerDay = switch (req.getStyle().getPace()) {
-            case RELAXED -> 2;
-            case BALANCED -> 3;
-            case PACKED -> 5;
-        };
-
-        List<TripPlanResponse.DayPlan> plan = new ArrayList<>();
-        int idx = 0;
-        LocalDate start = req.getBasics().getStartDate();
-
-        for (int d = 1; d <= days && idx < scored.size(); d++) {
-            List<TripPlanResponse.ScoredPoi> dayItems = new ArrayList<>();
-            int limit = Math.min(poisPerDay, scored.size() - idx);
-            for (int i = 0; i < limit; i++) {
-                dayItems.add(scored.get(idx++));
-            }
-            plan.add(TripPlanResponse.DayPlan.builder()
-                    .day(d)
-                    .date(start.plusDays(d - 1).toString())
-                    .items(dayItems)
-                    .build());
-        }
-        return plan;
-    }
-
     private String generateSummary(List<TripPlanResponse.ScoredPoi> scored, TripPlanRequest req, int days) {
         if (scored.isEmpty()) {
             return "No matching POIs found — try expanding your interests or search area.";
@@ -539,11 +930,30 @@ public class TripRecommendationService {
                 req.getBasics().getDestination(), topName, topCategory);
     }
 
-    private List<String> generateNotes(List<TripPlanResponse.ScoredPoi> scored, TripPlanRequest req) {
+    private List<String> generateNotes(List<TripPlanResponse.ScoredPoi> scored, TripPlanRequest req,
+                                       TripWeather weather, int tripDays, TripConstraints constraints) {
         List<String> notes = new ArrayList<>();
 
         if (scored.size() < 5) {
             notes.add("Few results — consider expanding interests or travel radius.");
+        }
+
+        if (constraints.budgetCap() != null) {
+            notes.add("Budget capped at " + constraints.budgetCap().name().toLowerCase().replace('_', ' ')
+                    + " based on your \"too expensive\" feedback.");
+        }
+        if (constraints.maxRadiusKm() != null) {
+            notes.add("Search kept within " + Math.round(constraints.maxRadiusKm() * 10.0) / 10.0
+                    + " km of your base — you prefer places close by.");
+        }
+        if (constraints.avoidCrowded()) {
+            notes.add("Popular, crowded venues are de-prioritized for you.");
+        }
+        if (constraints.familySafe()) {
+            notes.add("Adult-oriented venues excluded based on your feedback.");
+        }
+        if (constraints.quiet()) {
+            notes.add("Quieter spots are favored based on your feedback.");
         }
 
         TripEnums.MobilityLimitation mobility = req.getProfile().getMobilityLimitation();
@@ -553,6 +963,19 @@ public class TripRecommendationService {
 
         if (req.getStyle().getPlanningStyle() == TripEnums.PlanningStyle.SURPRISE_ME) {
             notes.add("Surprise mode active — results include a randomized element.");
+        }
+
+        if (weather != null && weather.days() != null && !weather.days().isEmpty()) {
+            int rainy = 0;
+            for (int i = 0; i < tripDays; i++) {
+                if (weather.isRainy(req.getBasics().getStartDate().plusDays(i).toString())) {
+                    rainy++;
+                }
+            }
+            if (rainy > 0) {
+                notes.add("Rain expected on %d of your %d days — indoor venues are boosted.".formatted(
+                        rainy, tripDays));
+            }
         }
 
         return notes;
