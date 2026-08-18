@@ -94,14 +94,19 @@ public class ItineraryOptimizer {
                                                          LocalDate date, boolean rainy,
                                                          boolean outdoorGood, int poisPerDay) {
         List<TripPlanResponse.ScoredPoi> pool = remaining.stream()
+                .filter(s -> !(rainy && TripWeather.isOpenRoof(s.getPoi())))
                 .filter(s -> isOpenOn(s.getPoi(), date))
                 .sorted(Comparator.comparingDouble(
                         (TripPlanResponse.ScoredPoi s) -> dayFitScore(s, rainy, outdoorGood)).reversed())
                 .limit(poisPerDay * 2L)
                 .toList();
         if (pool.isEmpty()) {
-            // Nothing reliably open today; fall back to best remaining POIs.
-            return remaining.stream().limit(poisPerDay * 2L).toList();
+            // Nothing reliably open today; fall back to best remaining POIs
+            // (still keeping open-roof venues off rainy days).
+            return remaining.stream()
+                    .filter(s -> !(rainy && TripWeather.isOpenRoof(s.getPoi())))
+                    .limit(poisPerDay * 2L)
+                    .toList();
         }
         return pool;
     }

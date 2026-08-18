@@ -75,6 +75,15 @@ public final class TripEnums {
     }
 
     /**
+     * Dietary restriction of the traveler (or NONE when unrestricted). Used to
+     * filter lunch-time restaurant suggestions. Distinct from {@link FoodPreference}
+     * ("what kind of food do you like") — this is "what you cannot eat".
+     */
+    public enum Diet {
+        NONE, VEGETARIAN, VEGAN, HALAL, GLUTEN_FREE, LACTOSE_FREE
+    }
+
+    /**
      * How much hand-holding the traveller wants.
      */
     public enum PlanningStyle {

@@ -47,6 +47,9 @@ class TripRecommendationServiceTest {
     @Mock
     private ItineraryNarrator itineraryNarrator;
 
+    @Mock
+    private LunchPlanner lunchPlanner;
+
     @InjectMocks
     private TripRecommendationService service;
 
@@ -54,6 +57,8 @@ class TripRecommendationServiceTest {
     void setUp() {
         lenient().when(travelTimeEstimator.minutesBetween(anyDouble(), anyDouble(), anyDouble(), anyDouble(), any()))
                 .thenReturn(10.0);
+        lenient().when(travelTimeEstimator.distanceKm(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
+                .thenReturn(0.5);
         lenient().when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any()))
                 .thenReturn(List.of());
         lenient().when(itineraryNarrator.narrate(any(), any(), any(), any(), any(), any(), any(), anyDouble()))
@@ -306,10 +311,299 @@ class TripRecommendationServiceTest {
         assertThat(resp.getNotes()).anyMatch(n -> n.contains("Budget capped at mid range"));
     }
 
+    @Test
+    void rainy_trip_excludes_open_roof_pois() {
+        PoiResponse park = PoiResponse.builder()
+                .id("55555555-5555-5555-5555-555555555555")
+                .nameTr("Gülhane Park")
+                .category("leisure")
+                .subcategory("park")
+                .lat(41.0120)
+                .lon(28.9810)
+                .completenessScore(75)
+                .distanceKm(1.0)
+                .attributes(Map.of())
+                .build();
+
+        TripPlanRequest req = sampleRequest();
+        req.getBasics().setStartDate(LocalDate.of(2026, 8, 15));
+        req.getBasics().setEndDate(LocalDate.of(2026, 8, 16));
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(museumPoi(), park));
+        when(weatherService.getWeather(anyDouble(), anyDouble(), anyInt())).thenReturn(twoRainyDays());
+
+        TripPlanResponse resp = service.recommend(req);
+
+        assertThat(resp.getSuggestions())
+                .noneMatch(s -> "55555555-5555-5555-5555-555555555555".equals(s.getPoi().getId()));
+        assertThat(resp.getSuggestions()).isNotEmpty();
+    }
+
+    @Test
+    void rooftop_restaurant_is_excluded_on_rainy_trip() {
+        PoiResponse rooftopBar = PoiResponse.builder()
+                .id("66666666-6666-6666-6666-666666666666")
+                .nameTr("Rooftop Bar")
+                .category("food_drink")
+                .subcategory("bar")
+                .lat(41.0200)
+                .lon(28.9900)
+                .completenessScore(80)
+                .distanceKm(2.0)
+                .attributes(Map.of())
+                .build();
+
+        TripPlanRequest req = sampleRequest();
+        req.getBasics().setStartDate(LocalDate.of(2026, 8, 15));
+        req.getBasics().setEndDate(LocalDate.of(2026, 8, 16));
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(museumPoi(), rooftopBar));
+        when(weatherService.getWeather(anyDouble(), anyDouble(), anyInt())).thenReturn(twoRainyDays());
+
+        TripPlanResponse resp = service.recommend(req);
+
+        assertThat(resp.getSuggestions())
+                .noneMatch(s -> "66666666-6666-6666-6666-666666666666".equals(s.getPoi().getId()));
+    }
+
+    @Test
+    void attaches_lunch_block_to_day_plan() {
+        TripPlanRequest req = sampleRequest();
+        req.getStyle().setPlanningStyle(TripEnums.PlanningStyle.DETAILED_SCHEDULE);
+
+        TripPlanResponse.ScoredPoi item = TripPlanResponse.ScoredPoi.builder()
+                .poi(museumPoi())
+                .score(80)
+                .factors(Map.of())
+                .reasons(List.of())
+                .startTime("10:30")
+                .endTime("12:30")
+                .travelMinutes(10)
+                .visitMinutes(120)
+                .build();
+        TripPlanResponse.DayPlan dayPlan = TripPlanResponse.DayPlan.builder()
+                .day(1)
+                .date("2026-08-15")
+                .weather("Sunny, 28°C")
+                .items(List.of(item))
+                .notes(List.of())
+                .build();
+        TripPlanResponse.LunchSlot lunch = TripPlanResponse.LunchSlot.builder()
+                .prompt("Lunch time — head back to the hotel, or should I pick a restaurant nearby?")
+                .needsDietInfo(true)
+                .nearbyRestaurants(List.of())
+                .build();
+
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(museumPoi()));
+        when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any()))
+                .thenReturn(List.of(dayPlan));
+        when(lunchPlanner.plan(any(), any(), anyDouble(), anyDouble())).thenReturn(lunch);
+
+        TripPlanResponse resp = service.recommend(req);
+
+        assertThat(resp.getDayPlan()).hasSize(1);
+        assertThat(resp.getDayPlan().get(0).getLunch()).isEqualTo(lunch);
+    }
+
+    @Test
+    void no_weather_forecast_is_graceful() {
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(museumPoi()));
+        when(weatherService.getWeather(anyDouble(), anyDouble(), anyInt()))
+                .thenThrow(new RuntimeException("timeout"));
+
+        TripPlanResponse resp = service.recommend(sampleRequest());
+
+        assertThat(resp.getSuggestions()).isNotEmpty();
+        assertThat(resp.getWeatherSummary()).isEmpty();
+        assertThat(resp.getNotes()).noneMatch(n -> n.contains("Rain"));
+    }
+
+    @Test
+    void empty_candidates_yield_hint_and_no_suggestions() {
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of());
+
+        TripPlanResponse resp = service.recommend(sampleRequest());
+
+        assertThat(resp.getSuggestions()).isEmpty();
+        assertThat(resp.getSummary()).contains("No matching POIs");
+        assertThat(resp.getNotes()).anyMatch(n -> n.contains("Few results"));
+    }
+
+    @Test
+    void invalid_accommodation_location_falls_back_to_istanbul_centre() {
+        TripPlanRequest req = sampleRequest();
+        req.getBasics().setAccommodationLocation("banana");
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(museumPoi()));
+
+        TripPlanResponse resp = service.recommend(req);
+
+        assertThat(resp.getSuggestions()).isNotEmpty();
+    }
+
+    @Test
+    void wheelchair_accessibility_ranks_above_non_accessible_same_category() {
+        PoiResponse accessible = museumPoi();
+        accessible.setId("11111111-1111-1111-1111-111111111111");
+        accessible.setNameTr("Accessible Museum");
+        accessible.setAttributes(Map.of("tourism", "museum", "wheelchair", "yes"));
+
+        PoiResponse notAccessible = museumPoi();
+        notAccessible.setId("22222222-2222-2222-2222-222222222222");
+        notAccessible.setNameTr("Stairs-Only Museum");
+        notAccessible.setAttributes(Map.of("tourism", "museum"));
+
+        TripPlanRequest req = sampleRequest();
+        req.getProfile().setMobilityLimitation(TripEnums.MobilityLimitation.WHEELCHAIR);
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(notAccessible, accessible));
+
+        TripPlanResponse resp = service.recommend(req);
+
+        assertThat(resp.getSuggestions().get(0).getPoi().getId())
+                .isEqualTo("11111111-1111-1111-1111-111111111111");
+        assertThat(resp.getSuggestions().get(0).getReasons())
+                .anyMatch(r -> r.contains("Wheelchair accessible"));
+    }
+
+    @Test
+    void vegetarian_food_preference_boosts_vegetarian_restaurants() {
+        PoiResponse veg = PoiResponse.builder()
+                .id("11111111-1111-1111-1111-111111111111")
+                .nameTr("Vegetarian Kitchen")
+                .category("food_drink")
+                .subcategory("restaurant")
+                .lat(41.0110)
+                .lon(28.9800)
+                .completenessScore(70)
+                .distanceKm(1.0)
+                .attributes(Map.of("diet:vegetarian", "yes"))
+                .build();
+        PoiResponse kebab = PoiResponse.builder()
+                .id("22222222-2222-2222-2222-222222222222")
+                .nameTr("Kebab House")
+                .category("food_drink")
+                .subcategory("restaurant")
+                .lat(41.0110)
+                .lon(28.9800)
+                .completenessScore(70)
+                .distanceKm(1.0)
+                .attributes(Map.of("cuisine", "kebab"))
+                .build();
+
+        TripPlanRequest req = sampleRequest();
+        req.getStyle().setFood(TripEnums.FoodPreference.VEGETARIAN);
+        req.getInterests().setSelectedInterests(List.of(TripEnums.Interest.FOOD));
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(kebab, veg));
+
+        TripPlanResponse resp = service.recommend(req);
+
+        assertThat(resp.getSuggestions().get(0).getPoi().getId())
+                .isEqualTo("11111111-1111-1111-1111-111111111111");
+        assertThat(resp.getSuggestions().get(0).getReasons())
+                .anyMatch(r -> r.contains("Vegetarian-friendly"));
+    }
+
+    @Test
+    void partially_rainy_trip_keeps_open_roof_in_suggestions() {
+        PoiResponse park = PoiResponse.builder()
+                .id("55555555-5555-5555-5555-555555555555")
+                .nameTr("Gülhane Park")
+                .category("leisure")
+                .subcategory("park")
+                .lat(41.0120)
+                .lon(28.9810)
+                .completenessScore(75)
+                .distanceKm(1.0)
+                .attributes(Map.of())
+                .build();
+
+        TripPlanRequest req = sampleRequest();
+        req.getBasics().setStartDate(LocalDate.of(2026, 8, 15));
+        req.getBasics().setEndDate(LocalDate.of(2026, 8, 17));
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(museumPoi(), park));
+        when(weatherService.getWeather(anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(oneRainyOfThree());
+
+        TripPlanResponse resp = service.recommend(req);
+
+        // Scoring keeps it (only 1 of 3 days is rainy); the per-day optimizer
+        // decides not to schedule it on that single rainy day.
+        assertThat(resp.getSuggestions())
+                .anyMatch(s -> "55555555-5555-5555-5555-555555555555".equals(s.getPoi().getId()));
+        assertThat(resp.getWeatherSummary()).containsIgnoringCase("rain");
+    }
+
+    @Test
+    void lunch_block_survives_narration() {
+        TripPlanRequest req = sampleRequest();
+        req.getStyle().setPlanningStyle(TripEnums.PlanningStyle.DETAILED_SCHEDULE);
+
+        TripPlanResponse.ScoredPoi item = TripPlanResponse.ScoredPoi.builder()
+                .poi(museumPoi())
+                .score(80)
+                .factors(Map.of())
+                .reasons(List.of())
+                .startTime("10:30")
+                .endTime("12:30")
+                .travelMinutes(10)
+                .visitMinutes(120)
+                .build();
+        TripPlanResponse.DayPlan dayPlan = TripPlanResponse.DayPlan.builder()
+                .day(1)
+                .date("2026-08-15")
+                .weather("Sunny, 28°C")
+                .items(List.of(item))
+                .notes(List.of())
+                .build();
+        TripPlanResponse.LunchSlot lunch = TripPlanResponse.LunchSlot.builder()
+                .prompt("Lunch time — head back to the hotel, or should I pick a restaurant nearby?")
+                .needsDietInfo(true)
+                .nearbyRestaurants(List.of())
+                .build();
+
+        when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
+                .thenReturn(List.of(museumPoi()));
+        when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any()))
+                .thenReturn(List.of(dayPlan));
+        when(lunchPlanner.plan(any(), any(), anyDouble(), anyDouble())).thenReturn(lunch);
+        when(itineraryNarrator.narrate(any(), any(), any(), any(), any(), any(), any(), anyDouble()))
+                .thenReturn(new ItineraryNarrator.NarrativeOutput("Overall story", List.of("Day 1 story")));
+
+        TripPlanResponse resp = service.recommend(req);
+
+        TripPlanResponse.DayPlan day = resp.getDayPlan().get(0);
+        assertThat(day.getLunch()).isEqualTo(lunch);
+        assertThat(day.getNarrative()).isEqualTo("Day 1 story");
+        assertThat(resp.getNarrative()).isEqualTo("Overall story");
+    }
+
+    private WeatherResponse oneRainyOfThree() {
+        var loc = new WeatherResponse.Location(41.0082, 28.9784, "Europe/Istanbul");
+        var current = new WeatherResponse.CurrentConditions(22, 23, 80, 12, 180, 61, "Slight rain");
+        return new WeatherResponse(loc, current, List.of(
+                new WeatherResponse.DailyForecast("2026-08-15", 22, 17, 8.0, 22, 61, "Rain"),
+                new WeatherResponse.DailyForecast("2026-08-16", 28, 19, 0.0, 8, 0, "Clear sky"),
+                new WeatherResponse.DailyForecast("2026-08-17", 29, 20, 0.0, 8, 0, "Clear sky")));
+    }
+
     private WeatherResponse rainyForecast() {
         var loc = new WeatherResponse.Location(41.0082, 28.9784, "Europe/Istanbul");
         var current = new WeatherResponse.CurrentConditions(22, 23, 80, 12, 180, 61, "Slight rain");
         var day = new WeatherResponse.DailyForecast("2026-08-15", 24, 18, 8.0, 20, 61, "Slight rain");
         return new WeatherResponse(loc, current, List.of(day));
+    }
+
+    private WeatherResponse twoRainyDays() {
+        var loc = new WeatherResponse.Location(41.0082, 28.9784, "Europe/Istanbul");
+        var current = new WeatherResponse.CurrentConditions(20, 21, 85, 15, 200, 61, "Rain");
+        var d1 = new WeatherResponse.DailyForecast("2026-08-15", 22, 17, 8.0, 22, 61, "Rain");
+        var d2 = new WeatherResponse.DailyForecast("2026-08-16", 21, 16, 10.0, 24, 63, "Rain");
+        return new WeatherResponse(loc, current, List.of(d1, d2));
     }
 }

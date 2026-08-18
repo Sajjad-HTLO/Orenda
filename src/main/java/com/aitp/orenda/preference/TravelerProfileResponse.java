@@ -37,5 +37,7 @@ public class TravelerProfileResponse {
 
     private TripEnums.FoodPreference food;
 
+    private TripEnums.Diet diet;
+
     private OffsetDateTime updatedAt;
 }

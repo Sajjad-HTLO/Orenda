@@ -168,7 +168,45 @@ public class ItineraryNarrator {
         if (day.getNotes() != null && !day.getNotes().isEmpty()) {
             sb.append("Tip: ").append(String.join(" ", day.getNotes())).append(System.lineSeparator());
         }
+
+        narrateLunch(day, sb);
         return sb.toString().stripTrailing();
+    }
+
+    /**
+     * Explains the lunch-time question: whether the app still needs the
+     * traveler's diet, how many restaurants it found near the stop, and the
+     * option to walk back to the hotel.
+     */
+    private static void narrateLunch(TripPlanResponse.DayPlan day, StringBuilder sb) {
+        TripPlanResponse.LunchSlot lunch = day.getLunch();
+        if (lunch == null) {
+            return;
+        }
+        if (Boolean.TRUE.equals(lunch.getNeedsDietInfo())) {
+            sb.append("Lunch is around noon — before I pick restaurants, tell me your "
+                    + "dietary needs (vegetarian, vegan, halal, gluten-free, …).")
+                    .append(System.lineSeparator());
+        }
+        List<TripPlanResponse.ScoredPoi> restaurants = lunch.getNearbyRestaurants();
+        if (restaurants != null && !restaurants.isEmpty()) {
+            int n = restaurants.size();
+            String label = restaurants.get(0).getReasons() != null
+                    && !restaurants.get(0).getReasons().isEmpty()
+                    ? restaurants.get(0).getReasons().get(0) : "restaurants";
+            sb.append("For lunch I found ").append(n).append(" restaurant")
+                    .append(n == 1 ? "" : "s").append(" near your stop (e.g. ")
+                    .append(name(restaurants.get(0).getPoi())).append(" — ").append(label)
+                    .append(')');
+            TripPlanResponse.ReturnToHotel back = lunch.getReturnToHotel();
+            if (back != null && back.getTravelMinutes() != null) {
+                sb.append(", or you can walk back to the hotel in about ")
+                        .append(back.getTravelMinutes()).append(" minutes");
+            }
+            sb.append('.').append(System.lineSeparator());
+        } else if (lunch.getNote() != null && !lunch.getNote().isBlank()) {
+            sb.append(lunch.getNote()).append(System.lineSeparator());
+        }
     }
 
     private static boolean isLively(PoiResponse poi) {

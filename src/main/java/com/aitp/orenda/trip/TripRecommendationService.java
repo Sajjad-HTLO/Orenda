@@ -51,6 +51,7 @@ public class TripRecommendationService {
     private final ItineraryOptimizer itineraryOptimizer;
     private final PreferenceService preferenceService;
     private final ItineraryNarrator itineraryNarrator;
+    private final LunchPlanner lunchPlanner;
 
     /**
      * Default search radius (km) around the accommodation. Can be expanded if needed.
@@ -131,6 +132,11 @@ public class TripRecommendationService {
         List<TripPlanResponse.DayPlan> dayPlan = itineraryOptimizer.build(
                 withTravel, req, tripDays, lat, lon, weather);
 
+        // 6b. Lunch-time blocks: ask "hotel or nearby restaurant?", collect the
+        //     traveler's diet when unknown, and suggest diet-matched restaurants
+        //     near wherever they are at lunch.
+        List<TripPlanResponse.DayPlan> withLunch = enrichLunch(dayPlan, req, lat, lon);
+
         // 7. Summary and notes
         String summary = generateSummary(withTravel, req, tripDays);
         List<String> notes = generateNotes(withTravel, req, weather, tripDays, constraints);
@@ -138,9 +144,9 @@ public class TripRecommendationService {
         String preferenceInsight = preferenceService.insightFor(prefWeights);
 
         // 8. AI-generated itinerary narrative (natural-language reasoning layer)
-        ItineraryNarrator.NarrativeOutput narrative = itineraryNarrator.narrate(req, dayPlan, withTravel,
+        ItineraryNarrator.NarrativeOutput narrative = itineraryNarrator.narrate(req, withLunch, withTravel,
                 preferenceInsight, weatherSummary, constraints, effectiveBudget, radiusKm);
-        List<TripPlanResponse.DayPlan> narratedPlan = applyDayNarratives(dayPlan, narrative.dayNarratives());
+        List<TripPlanResponse.DayPlan> narratedPlan = applyDayNarratives(withLunch, narrative.dayNarratives());
 
         return TripPlanResponse.builder()
                 .tripDays(tripDays)
@@ -169,9 +175,36 @@ public class TripRecommendationService {
                     .items(day.getItems())
                     .notes(day.getNotes())
                     .narrative(i < dayNarratives.size() ? dayNarratives.get(i) : null)
+                    .lunch(day.getLunch())
                     .build());
         }
         return narrated;
+    }
+
+    /**
+     * Attaches the interactive lunch block to every day of the plan (when there
+     * is one). Kept separate from the optimizer so the lunch questions can be
+     * answered in a follow-up round-trip without re-running the whole pipeline.
+     */
+    private List<TripPlanResponse.DayPlan> enrichLunch(List<TripPlanResponse.DayPlan> plan,
+                                                       TripPlanRequest req,
+                                                       double baseLat, double baseLon) {
+        if (plan.isEmpty()) {
+            return plan;
+        }
+        List<TripPlanResponse.DayPlan> enriched = new ArrayList<>(plan.size());
+        for (TripPlanResponse.DayPlan day : plan) {
+            enriched.add(TripPlanResponse.DayPlan.builder()
+                    .day(day.getDay())
+                    .date(day.getDate())
+                    .weather(day.getWeather())
+                    .items(day.getItems())
+                    .notes(day.getNotes())
+                    .narrative(day.getNarrative())
+                    .lunch(lunchPlanner.plan(req, day, baseLat, baseLon))
+                    .build());
+        }
+        return enriched;
     }
 
     /* ────────────────── Weather context ────────────────── */
@@ -270,8 +303,18 @@ public class TripRecommendationService {
         double openingScore = openDuringTrip(poi, startDate, tripDays, reasons);
         factors.put("opening_hours", openingScore);
 
-        // k) Weather stage — indoor on rainy trips, outdoor on clear trips
+        // k) Weather stage — indoor on rainy trips, outdoor on clear trips.
+        //    Open-roof / open-air venues are excluded outright when it rains.
         double weatherScore = scoreWeather(poi, weather, startDate, tripDays, reasons);
+        if (weatherScore <= 0) {
+            reasons.add("Open-roof / outdoor venue — avoid during the rain");
+            return TripPlanResponse.ScoredPoi.builder()
+                    .poi(poi)
+                    .score(0)
+                    .factors(factors)
+                    .reasons(reasons)
+                    .build();
+        }
         factors.put("weather", weatherScore);
 
         // l) Learned preference weights (from feedback) — boosts what this
@@ -420,13 +463,13 @@ public class TripRecommendationService {
         double rainyFraction = tripDays == 0 ? 0 : (double) rainyDays / tripDays;
 
         if (rainyFraction >= 0.4) {
+            if (TripWeather.isOpenRoof(poi)) {
+                reasons.add("Open-roof / outdoor venue — avoid during the rain");
+                return 0;
+            }
             if (indoor) {
                 reasons.add("Mostly indoor — well suited to the rainy forecast");
                 return 10;
-            }
-            if (outdoor) {
-                reasons.add("Outdoor venue during rainy days — consider a backup plan");
-                return 2;
             }
             return 5;
         }

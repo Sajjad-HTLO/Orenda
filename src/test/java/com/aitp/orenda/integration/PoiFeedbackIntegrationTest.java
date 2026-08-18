@@ -102,12 +102,14 @@ class PoiFeedbackIntegrationTest {
     }
 
     private ResponseEntity<String> postFeedbackRaw(Object body) {
+        // exchange() (not retrieve()) so 4xx/5xx responses are returned instead
+        // of throwing — the error-case tests assert on the status code.
         return client.post()
                 .uri("/api/pois/feedback")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(body)
-                .retrieve()
-                .toEntity(String.class);
+                .exchange((req, resp) -> ResponseEntity.status(resp.getStatusCode())
+                        .body(resp.bodyTo(String.class)));
     }
 
     // ── Happy-path tests ───────────────────────────────────────────────────

@@ -7,6 +7,8 @@ import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import lombok.Builder;
 import lombok.Data;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -18,12 +20,16 @@ import java.util.List;
  */
 @Data
 @Builder
+@AllArgsConstructor
+@NoArgsConstructor
 public class TripPlanRequest {
 
     /* ── 1. Trip basics ───────────────────────────────────────────────────── */
 
     @Data
     @Builder
+    @AllArgsConstructor
+    @NoArgsConstructor
     public static class TripBasics {
         @NotBlank(message = "destination must not be blank")
         private String destination;
@@ -55,6 +61,8 @@ public class TripPlanRequest {
 
     @Data
     @Builder
+    @AllArgsConstructor
+    @NoArgsConstructor
     public static class TravelerProfile {
         @NotNull(message = "ageRange must not be null")
         private TripEnums.AgeRange ageRange;
@@ -68,12 +76,21 @@ public class TripPlanRequest {
         private List<TripEnums.AgeRange> childAgeRanges;
 
         private TripEnums.MobilityLimitation mobilityLimitation;
+
+        /**
+         * Dietary restriction of the group (NONE = unrestricted). When left null,
+         * the planner flags the plan as needing the traveler's diet before it can
+         * recommend lunch restaurants.
+         */
+        private TripEnums.Diet diet;
     }
 
     /* ── 3. Interests ─────────────────────────────────────────────────────── */
 
     @Data
     @Builder
+    @AllArgsConstructor
+    @NoArgsConstructor
     public static class Interests {
         @NotNull(message = "selectedInterests must not be null")
         private List<TripEnums.Interest> selectedInterests;
@@ -88,6 +105,8 @@ public class TripPlanRequest {
 
     @Data
     @Builder
+    @AllArgsConstructor
+    @NoArgsConstructor
     public static class TravelStyle {
         @NotNull(message = "pace must not be null")
         private TripEnums.Pace pace;

@@ -4,6 +4,7 @@ import com.aitp.orenda.model.PoiResponse;
 import com.aitp.orenda.weather.WeatherResponse;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -81,5 +82,36 @@ public record TripWeather(List<WeatherResponse.DailyForecast> days) {
                         "ruins", "archaeological", "castle", "fort", "citadel", "marina",
                         "stadium", "sports_centre", "memorial")
                 .contains(s);
+    }
+
+    /**
+     * Whether a POI is effectively unsheltered — an open-roof / open-air venue the
+     * traveler would get soaked at in the rain. True for every outdoor POI plus
+     * any venue that is tagged as un-covered or whose name signals a rooftop or
+     * open-air terrace (e.g. "Roof Bar", "Rooftop Terrace"). Used to exclude
+     * open-roof venues on rainy days.
+     */
+    public static boolean isOpenRoof(PoiResponse poi) {
+        if (isOutdoor(poi)) {
+            return true;
+        }
+        Map<String, Object> attrs = poi.getAttributes();
+        if (attrs != null) {
+            if (isValue("no", attrs.get("covered")) || isValue("no", attrs.get("roof"))) {
+                return true;
+            }
+            if (isValue("yes", attrs.get("open_air")) || isValue("yes", attrs.get("rooftop"))) {
+                return true;
+            }
+        }
+        String name = (poi.getNameTr() == null ? "" : poi.getNameTr().toLowerCase())
+                + " " + (poi.getNameEn() == null ? "" : poi.getNameEn().toLowerCase());
+        return name.contains("rooftop") || name.contains("roof terrace")
+                || name.contains("roof top") || name.contains(" roof ")
+                || name.contains("open-air") || name.contains("open air");
+    }
+
+    private static boolean isValue(String expected, Object actual) {
+        return actual != null && expected.equalsIgnoreCase(String.valueOf(actual));
     }
 }

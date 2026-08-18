@@ -1,6 +1,6 @@
 package com.aitp.orenda.trip;
-
 import com.aitp.orenda.model.PoiResponse;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -13,6 +13,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -21,13 +22,16 @@ class ItineraryOptimizerTest {
     @Mock
     private TravelTimeEstimator travelTimeEstimator;
 
+    @BeforeEach
+    void setUp() {
+        lenient().when(travelTimeEstimator.minutesBetween(anyDouble(), anyDouble(), anyDouble(), anyDouble(), any()))
+                .thenReturn(10.0);
+        lenient().when(travelTimeEstimator.distanceKm(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
+                .thenReturn(0.8);
+    }
+
     @Test
     void builds_timed_day_plan_with_opening_and_weather_notes() {
-        when(travelTimeEstimator.minutesBetween(anyDouble(), anyDouble(), anyDouble(), anyDouble(), any()))
-                .thenReturn(10.0);
-        when(travelTimeEstimator.distanceKm(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
-                .thenReturn(0.8);
-
         ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
 
         TripPlanRequest req = TripPlanRequest.builder()
@@ -88,6 +92,147 @@ class ItineraryOptimizerTest {
 
         TripPlanResponse.DayPlan clearDay = plan.get(1);
         assertThat(clearDay.getWeather()).contains("Clear");
+    }
+
+    @Test
+    void open_roof_venue_is_moved_from_rainy_to_clear_day() {
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+
+        TripPlanRequest req = balancedRequest();
+        PoiResponse museum = poi("11111111-1111-1111-1111-111111111111", "tourism", "museum", Map.of());
+        PoiResponse park = poi("22222222-2222-2222-2222-222222222222", "leisure", "park", Map.of());
+
+        TripWeather weather = new TripWeather(List.of(
+                new com.aitp.orenda.weather.WeatherResponse.DailyForecast(
+                        "2026-08-15", 21, 16, 8.0, 22, 61, "Rain"),
+                new com.aitp.orenda.weather.WeatherResponse.DailyForecast(
+                        "2026-08-16", 28, 19, 0.0, 8, 0, "Clear sky")));
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(park, 70), scored(museum, 80)), req, 2, 41.0082, 28.9784, weather);
+
+        assertThat(plan).hasSize(2);
+        // Rainy day 1: only the museum (indoor) is scheduled, never the open-roof park.
+        assertThat(plan.get(0).getItems()).extracting(i -> i.getPoi().getSubcategory())
+                .containsExactly("museum");
+        // Clear day 2: the park finally lands.
+        assertThat(plan.get(1).getItems()).extracting(i -> i.getPoi().getSubcategory())
+                .contains("park");
+    }
+
+    @Test
+    void rainy_day_with_only_open_roof_candidates_stays_lighter() {
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+
+        TripPlanRequest req = balancedRequest();
+        PoiResponse park = poi("22222222-2222-2222-2222-222222222222", "leisure", "park", Map.of());
+        TripWeather weather = new TripWeather(List.of(
+                new com.aitp.orenda.weather.WeatherResponse.DailyForecast(
+                        "2026-08-15", 21, 16, 8.0, 22, 61, "Rain")));
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(park, 90)), req, 1, 41.0082, 28.9784, weather);
+
+        assertThat(plan).hasSize(1);
+        // Better a free afternoon than sending the traveler out into the rain.
+        assertThat(plan.get(0).getItems()).isEmpty();
+    }
+
+    @Test
+    void walking_budget_skips_too_far_pois_in_foot_mode() {
+        when(travelTimeEstimator.minutesBetween(anyDouble(), anyDouble(), anyDouble(), anyDouble(), any()))
+                .thenAnswer(inv -> (double) inv.getArgument(2) > 41.03 ? 20.0 : 5.0);
+        when(travelTimeEstimator.distanceKm(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
+                .thenAnswer(inv -> (double) inv.getArgument(2) > 41.03 ? 8.0 : 0.5);
+
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+
+        TripPlanRequest req = balancedRequest();
+        req.getBasics().setTransportMode(TripEnums.TransportMode.FOOT);
+        PoiResponse near = poi("11111111-1111-1111-1111-111111111111", "culture", "museum", Map.of());
+        PoiResponse far = poi("22222222-2222-2222-2222-222222222222", "nature", "park", Map.of());
+        far.setLat(41.0500);
+        far.setLon(28.9000);
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(far, 90), scored(near, 80)), req, 1, 41.0082, 28.9784, TripWeather.empty());
+
+        // MODERATE walk budget = 6 km; the far park is 8 km on foot → skipped.
+        assertThat(plan.get(0).getItems())
+                .extracting(i -> i.getPoi().getSubcategory())
+                .containsExactly("museum");
+    }
+
+    @Test
+    void travel_budget_skips_an_overly_long_leg() {
+        when(travelTimeEstimator.minutesBetween(anyDouble(), anyDouble(), anyDouble(), anyDouble(), any()))
+                .thenAnswer(inv -> (double) inv.getArgument(2) > 41.03 ? 150.0 : 10.0);
+        when(travelTimeEstimator.distanceKm(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
+                .thenReturn(0.8);
+
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+
+        TripPlanRequest req = balancedRequest();
+        req.getBasics().setTransportMode(TripEnums.TransportMode.DRIVING);
+        PoiResponse near = poi("11111111-1111-1111-1111-111111111111", "culture", "museum", Map.of());
+        PoiResponse far = poi("22222222-2222-2222-2222-222222222222", "historic", "castle", Map.of());
+        far.setLat(41.0500);
+        far.setLon(28.9000);
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(far, 90), scored(near, 80)), req, 1, 41.0082, 28.9784, TripWeather.empty());
+
+        // BALANCED day travel budget = 120 min; a single 150-min leg is dropped.
+        assertThat(plan.get(0).getItems())
+                .extracting(i -> i.getPoi().getSubcategory())
+                .containsExactly("museum");
+    }
+
+    @Test
+    void recommendations_only_returns_no_day_plan() {
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+
+        TripPlanRequest req = balancedRequest();
+        req.getStyle().setPlanningStyle(TripEnums.PlanningStyle.RECOMMENDATIONS_ONLY);
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(poi("11111111-1111-1111-1111-111111111111", "culture", "museum", Map.of()), 80)),
+                req, 2, 41.0082, 28.9784, TripWeather.empty());
+
+        assertThat(plan).isEmpty();
+    }
+
+    private TripPlanRequest balancedRequest() {
+        return TripPlanRequest.builder()
+                .basics(TripPlanRequest.TripBasics.builder()
+                        .destination("Istanbul")
+                        .startDate(LocalDate.of(2026, 8, 15))
+                        .endDate(LocalDate.of(2026, 8, 16))
+                        .travelerCount(2)
+                        .accommodationLocation("41.0082,28.9784")
+                        .transportMode(TripEnums.TransportMode.FOOT)
+                        .build())
+                .profile(TripPlanRequest.TravelerProfile.builder()
+                        .ageRange(TripEnums.AgeRange.AGE_25_34)
+                        .groupType(TripEnums.GroupType.COUPLE)
+                        .mobilityLimitation(TripEnums.MobilityLimitation.NONE)
+                        .build())
+                .interests(TripPlanRequest.Interests.builder()
+                        .selectedInterests(List.of(TripEnums.Interest.MUSEUMS))
+                        .build())
+                .style(TripPlanRequest.TravelStyle.builder()
+                        .pace(TripEnums.Pace.BALANCED)
+                        .walking(TripEnums.WalkingLevel.MODERATE)
+                        .budget(TripEnums.Budget.MID_RANGE)
+                        .food(TripEnums.FoodPreference.NO_PREFERENCE)
+                        .planningStyle(TripEnums.PlanningStyle.DETAILED_SCHEDULE)
+                        .build())
+                .build();
+    }
+
+    private TripPlanResponse.ScoredPoi scored(PoiResponse poi, double score) {
+        return TripPlanResponse.ScoredPoi.builder()
+                .poi(poi).score(score).factors(Map.of()).reasons(List.of()).build();
     }
 
     private PoiResponse poi(String id, String category, String subcategory, Map<String, Object> attrs) {

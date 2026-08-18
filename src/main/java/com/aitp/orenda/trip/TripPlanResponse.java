@@ -85,5 +85,53 @@ public class TripPlanResponse {
         private List<ScoredPoi> items;
         private List<String> notes;          // day-specific advice (lunch, rain, walking)
         private String narrative;            // natural-language narration of this day
+        private LunchSlot lunch;             // lunch-time question + restaurant options
+    }
+
+    /**
+     * Interactive lunch-time block for one day. When the traveler reaches the
+     * lunch window the app asks whether to head back to the hotel or eat nearby,
+     * and — when the traveler's diet is unknown — surfaces a pop-up to collect it
+     * before suggesting restaurants. Restaurant suggestions are filtered by the
+     * traveler's diet and ranked by proximity to where they are at lunch time.
+     */
+    @Data
+    @Builder
+    public static class LunchSlot {
+        /**
+         * The question to show the traveler, e.g. "Lunch time — head back to the
+         * hotel, or should I pick a restaurant nearby?"
+         */
+        private String prompt;
+
+        /**
+         * True when the app does not know the traveler's diet yet — the client
+         * should open a pop-up asking for it before showing restaurant picks.
+         */
+        private Boolean needsDietInfo;
+
+        /**
+         * Diet-filtered restaurants near the traveler's lunch-time location,
+         * best first. Empty when the day already includes a lunch stop.
+         */
+        private List<ScoredPoi> nearbyRestaurants;
+
+        /**
+         * The "head back to the hotel" option — how far it is from lunch.
+         */
+        private ReturnToHotel returnToHotel;
+
+        /**
+         * Human-readable context, e.g. "3 vegetarian-friendly places near your
+         * lunch stop."
+         */
+        private String note;
+    }
+
+    @Data
+    @Builder
+    public static class ReturnToHotel {
+        private Integer travelMinutes;
+        private Double distanceKm;
     }
 }

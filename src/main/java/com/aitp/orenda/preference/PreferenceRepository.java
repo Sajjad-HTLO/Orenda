@@ -35,15 +35,16 @@ public class PreferenceRepository {
     public void upsertProfile(TravelerProfileRequest req) {
         jdbc.update("""
                         INSERT INTO traveler_profile
-                            (session_id, interests, pace, budget, walking, food,
+                            (session_id, interests, pace, budget, walking, food, diet,
                              group_type, age_range, mobility, traveler_count, children_count)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (session_id) DO UPDATE SET
                             interests   = EXCLUDED.interests,
                             pace        = EXCLUDED.pace,
                             budget      = EXCLUDED.budget,
                             walking     = EXCLUDED.walking,
                             food        = EXCLUDED.food,
+                            diet        = EXCLUDED.diet,
                             group_type  = EXCLUDED.group_type,
                             age_range   = EXCLUDED.age_range,
                             mobility    = EXCLUDED.mobility,
@@ -58,17 +59,18 @@ public class PreferenceRepository {
                     ps.setString(4, enumName(req.getBudget()));
                     ps.setString(5, enumName(req.getWalking()));
                     ps.setString(6, enumName(req.getFood()));
-                    ps.setString(7, enumName(req.getGroupType()));
-                    ps.setString(8, enumName(req.getAgeRange()));
-                    ps.setString(9, enumName(req.getMobility()));
-                    ps.setObject(10, req.getTravelerCount());
-                    ps.setObject(11, req.getChildrenCount());
+                    ps.setString(7, enumName(req.getDiet()));
+                    ps.setString(8, enumName(req.getGroupType()));
+                    ps.setString(9, enumName(req.getAgeRange()));
+                    ps.setString(10, enumName(req.getMobility()));
+                    ps.setObject(11, req.getTravelerCount());
+                    ps.setObject(12, req.getChildrenCount());
                 });
     }
 
     public TravelerProfileResponse findProfile(String sessionId) {
         return jdbc.query("""
-                        SELECT session_id, interests, pace, budget, walking, food,
+                        SELECT session_id, interests, pace, budget, walking, food, diet,
                                group_type, age_range, mobility, traveler_count, children_count, updated_at
                         FROM traveler_profile
                         WHERE session_id = ?
@@ -84,6 +86,7 @@ public class PreferenceRepository {
                             .budget(enumValue(TripEnums.Budget.class, rs.getString("budget")))
                             .walking(enumValue(TripEnums.WalkingLevel.class, rs.getString("walking")))
                             .food(enumValue(TripEnums.FoodPreference.class, rs.getString("food")))
+                            .diet(enumValue(TripEnums.Diet.class, rs.getString("diet")))
                             .groupType(enumValue(TripEnums.GroupType.class, rs.getString("group_type")))
                             .ageRange(enumValue(TripEnums.AgeRange.class, rs.getString("age_range")))
                             .mobility(enumValue(TripEnums.MobilityLimitation.class, rs.getString("mobility")))
