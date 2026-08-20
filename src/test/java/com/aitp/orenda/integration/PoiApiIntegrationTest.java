@@ -82,18 +82,33 @@ class PoiApiIntegrationTest {
 
     @Test
     void nearby_withCategoryFilter_returnsMatchingPois() {
-        JsonNode pois = client.get()
-                .uri("/api/pois/nearby?lat={lat}&lon={lon}&radiusKm=5&category=historic&size=5",
-                        ISTANBUL_LAT, ISTANBUL_LON)
-                .exchange()
-                .expectStatus().isOk()
-                .expectBody(JsonNode.class)
-                .returnResult()
-                .getResponseBody();
+        // Insert a synthetic POI in a known category so the filter has something
+        // to match regardless of which import dataset is loaded (the DB may
+        // currently only contain hotel POIs from the TripAdvisor crawler).
+        long osmId = 9_999_999_999_996L;
+        jdbc.update("DELETE FROM poi WHERE osm_id = ?", osmId);
+        jdbc.update("""
+                INSERT INTO poi (osm_id, osm_type, name_tr, name_en, category, subcategory,
+                                 location, completeness_score, attributes)
+                VALUES (?, 'N', 'Test Historic POI', 'Test Historic POI', 'historic', 'monument',
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, 80, '{}'::jsonb)
+                """, osmId, ISTANBUL_LON, ISTANBUL_LAT);
+        try {
+            JsonNode pois = client.get()
+                    .uri("/api/pois/nearby?lat={lat}&lon={lon}&radiusKm=5&category=historic&size=5",
+                            ISTANBUL_LAT, ISTANBUL_LON)
+                    .exchange()
+                    .expectStatus().isOk()
+                    .expectBody(JsonNode.class)
+                    .returnResult()
+                    .getResponseBody();
 
-        assertThat(pois).isNotEmpty();
-        for (JsonNode poi : pois) {
-            assertThat(poi.get("category").asText()).isEqualTo("historic");
+            assertThat(pois).isNotEmpty();
+            for (JsonNode poi : pois) {
+                assertThat(poi.get("category").asText()).isEqualTo("historic");
+            }
+        } finally {
+            jdbc.update("DELETE FROM poi WHERE osm_id = ?", osmId);
         }
     }
 

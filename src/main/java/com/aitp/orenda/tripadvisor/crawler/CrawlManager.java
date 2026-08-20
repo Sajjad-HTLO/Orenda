@@ -30,6 +30,7 @@ public class CrawlManager {
     private final HotelDetailWorker hotelDetailWorker;
     private final HotelRepository hotelRepository;
     private final CrawlerPropertiesFileUpdater propertiesFileUpdater;
+    private final CrawlerStopEventLogger stopEventLogger;
 
     /**
      * In-memory registry of hotel detail URLs that have already been successfully
@@ -48,13 +49,15 @@ public class CrawlManager {
             ListingWorker listingWorker,
             HotelDetailWorker hotelDetailWorker,
             HotelRepository hotelRepository,
-            CrawlerPropertiesFileUpdater propertiesFileUpdater) {
+            CrawlerPropertiesFileUpdater propertiesFileUpdater,
+            CrawlerStopEventLogger stopEventLogger) {
         this.properties = properties;
         this.paginationGenerator = paginationGenerator;
         this.listingWorker = listingWorker;
         this.hotelDetailWorker = hotelDetailWorker;
         this.hotelRepository = hotelRepository;
         this.propertiesFileUpdater = propertiesFileUpdater;
+        this.stopEventLogger = stopEventLogger;
     }
 
     /**
@@ -135,6 +138,30 @@ public class CrawlManager {
         log.info("Tripadvisor crawl manager finished. submittedPages={}, completedPages={}, skippedPages={}, failedPages={}, extractedHotels={}, detailedHotels={}, totalTripadvisorPois={}",
                 submittedPages, completedPages, skippedPages, failedPages, extractedHotels, detailedHotels,
                 hotelRepository.countHotels());
+        recordStopReason(consecutiveEmptyPages, submittedPages, completedPages, skippedPages, failedPages);
+    }
+
+    /**
+     * Appends a STOP event to the crawler stop log explaining why the crawl loop
+     * terminated, so repeated blocks/captchas that halted the run are traceable.
+     */
+    private void recordStopReason(int consecutiveEmptyPages, int submittedPages,
+                                  int completedPages, int skippedPages, int failedPages) {
+        String reason;
+        if (properties.singlePageOnly()) {
+            reason = "single-page-only mode enabled; stopped after first requested page";
+        } else if (consecutiveEmptyPages >= properties.maxEmptyPages()) {
+            reason = "reached maxEmptyPages=%d consecutive empty/failed pages; crawler stopped (possible IP block or captcha)";
+        } else {
+            reason = "crawl loop completed";
+        }
+        stopEventLogger.record(CrawlerStopEventLogger.TYPE_STOP, "CRAWL_MANAGER", properties.baseUrl(),
+                null, reason.formatted(properties.maxEmptyPages()),
+                null, 0, "LOOP_EXIT");
+        stopEventLogger.record(CrawlerStopEventLogger.TYPE_STOP, "CRAWL_MANAGER", properties.baseUrl(),
+                null, "summary: submittedPages=%d completedPages=%d skippedPages=%d failedPages=%d".formatted(
+                        submittedPages, completedPages, skippedPages, failedPages),
+                null, 0, "SUMMARY");
     }
 
     /**

@@ -4,12 +4,16 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.Builder;
 import lombok.Data;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
 
 /**
  * User-submitted feedback for a POI (closed, inaccurate, moved, duplicate, other).
  */
 @Data
 @Builder
+@AllArgsConstructor
+@NoArgsConstructor
 public class FeedbackRequest {
 
     /**
