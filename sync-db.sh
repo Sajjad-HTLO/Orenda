@@ -58,9 +58,24 @@ run_src() {
         psql -v ON_ERROR_STOP=0 -U "$DB_USER" -d "$DB_NAME" "$@"
 }
 run_tgt() {
-    # target = direct psql connection (set env vars)
-    PGPASSWORD="$DB_PASS" psql -v ON_ERROR_STOP=0 \
-        -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" "$@"
+    # target = docker container (same app container) OR direct psql connection.
+    # If the target runs the same aitp-pg container, use docker exec (no psql
+    # client needed on the host). Otherwise fall back to direct psql via env.
+    if [ "${TARGET_VIA_DOCKER:-1}" = "1" ]; then
+        docker exec -i -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
+            psql -v ON_ERROR_STOP=0 -U "$DB_USER" -d "$DB_NAME" "$@"
+    else
+        PGPASSWORD="$DB_PASS" psql -v ON_ERROR_STOP=0 \
+            -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" "$@"
+    fi
+}
+
+# Run a host-side SQL file through psql by piping its contents on stdin.
+# This works for BOTH docker exec (file lives on host, not in container) and
+# direct psql. Usage: run_tgt_file /host/path/file.sql
+run_tgt_file() {
+    local file="$1"
+    cat "$file" | run_tgt
 }
 
 usage() {
@@ -148,9 +163,10 @@ do_import() {
     [ -f "$dir/poi.data.sql" ] || { echo "ERROR: $dir/poi.data.sql not found" >&2; exit 1; }
 
     echo "== Applying extensions (idempotent) =="
-    run_tgt -f "$dir/extensions.sql" 2>/dev/null || true
+    run_tgt_file "$dir/extensions.sql" 2>/dev/null || true
 
     echo "== Applying schema (idempotent, ignores 'already exists') =="
+    run_tgt_file "$dir/schema.sql" 2>/dev/null || true
     # Create staging table used for upsert.
     run_tgt <<'SQL'
 CREATE TABLE IF NOT EXISTS sync_stage_poi (LIKE poi INCLUDING ALL);
@@ -199,7 +215,7 @@ SQL
         if [ -f "$dir/$t.data.sql" ]; then
             echo "== Importing $t (clear + reload) =="
             run_tgt -c "DELETE FROM $t;"
-            run_tgt -f "$dir/$t.data.sql"
+            run_tgt_file "$dir/$t.data.sql"
         fi
     done
 
