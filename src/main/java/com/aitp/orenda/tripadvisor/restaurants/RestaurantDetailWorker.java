@@ -1,18 +1,11 @@
-package com.aitp.orenda.tripadvisor.crawler;
+package com.aitp.orenda.tripadvisor.restaurants;
 
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.options.WaitUntilState;
-import com.aitp.orenda.tripadvisor.config.TripadvisorCrawlerProperties;
-import com.aitp.orenda.tripadvisor.model.HotelDetail;
-import com.aitp.orenda.tripadvisor.model.HotelDetailCrawlResult;
-import com.aitp.orenda.tripadvisor.model.HotelListing;
-import com.aitp.orenda.tripadvisor.parser.HotelDetailParser;
-import com.aitp.orenda.tripadvisor.repository.HotelRepository;
 import com.aitp.orenda.tripadvisor.image.ImageSaver;
-import com.aitp.orenda.tripadvisor.util.RandomDelay;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -21,57 +14,43 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * Stage 2 worker: opens each individual Tripadvisor hotel review URL and
- * extracts detailed data (name, address, geo, rating, reviews, price range,
- * phone, description) which is then mapped onto the shared {@code poi} model
- * and persisted.
- * <p>
- * Each invocation opens its own Playwright/browser instance (Playwright objects
- * are not thread-safe) and reuses the same DataDome warm-up + human-behavior
- * strategy as {@link ListingWorker}.
+ * Stage 2 worker for the restaurant crawler: opens each individual Tripadvisor
+ * restaurant review URL, extracts detailed data and image URLs, persists the
+ * detail, then downloads and stores the image binaries. Each invocation opens
+ * its own Playwright/browser instance and reuses the DataDome warm-up +
+ * human-behavior strategy.
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
-public class HotelDetailWorker {
+@ConditionalOnProperty(name = "tripadvisor.crawler.restaurants.enabled", havingValue = "true")
+public class RestaurantDetailWorker {
 
     private static final String TRIPADVISOR_HOMEPAGE = "https://www.tripadvisor.com/";
     private static final String DATADOME_MARKER = "captcha-delivery.com";
     private static final String DATADOME_CHALLENGE_TITLE = "tripadvisor.com";
 
-    private final TripadvisorCrawlerProperties properties;
-    private final HotelDetailParser hotelDetailParser;
-    private final HotelRepository hotelRepository;
+    private final RestaurantCrawlerProperties properties;
+    private final RestaurantDetailParser restaurantDetailParser;
+    private final RestaurantRepository restaurantRepository;
     private final ImageSaver imageSaver;
-    private final RandomDelay randomDelay;
-    private final CrawlerStopEventLogger stopEventLogger;
 
-    public HotelDetailWorker(
-            TripadvisorCrawlerProperties properties,
-            HotelDetailParser hotelDetailParser,
-            HotelRepository hotelRepository,
-            ImageSaver imageSaver,
-            RandomDelay randomDelay,
-            CrawlerStopEventLogger stopEventLogger) {
+    public RestaurantDetailWorker(
+            RestaurantCrawlerProperties properties,
+            RestaurantDetailParser restaurantDetailParser,
+            RestaurantRepository restaurantRepository,
+            ImageSaver imageSaver) {
         this.properties = properties;
-        this.hotelDetailParser = hotelDetailParser;
-        this.hotelRepository = hotelRepository;
+        this.restaurantDetailParser = restaurantDetailParser;
+        this.restaurantRepository = restaurantRepository;
         this.imageSaver = imageSaver;
-        this.randomDelay = randomDelay;
-        this.stopEventLogger = stopEventLogger;
     }
 
-    /**
-     * Crawls a single hotel detail page and persists the mapped POI.
-     *
-     * @return a {@link HotelDetailCrawlResult} carrying the parsed detail on
-     *         success and a human-readable reason on failure.
-     */
-    public HotelDetailCrawlResult crawl(HotelListing listing) {
+    public RestaurantDetailCrawlResult crawl(RestaurantListing listing) {
         long startedAt = System.currentTimeMillis();
-        log.info("TRIPADVISOR_HOTEL_DETAIL_START tripadvisorId={} url={} sourceListingUrl={}",
+        log.info("TRIPADVISOR_RESTAURANT_DETAIL_START tripadvisorId={} url={} sourceListingUrl={}",
                 listing.tripadvisorId(), listing.url(), listing.sourceListingUrl());
 
         Path userDataDir = ensureUserDataDir();
@@ -103,7 +82,7 @@ public class HotelDetailWorker {
             injectStealthScripts(page);
 
             // Warm up homepage to establish DataDome cookies
-            log.info("TRIPADVISOR_HOTEL_DETAIL_WARMUP tripadvisorId={} url={} message=Visiting homepage for DataDome cookie warming",
+            log.info("TRIPADVISOR_RESTAURANT_DETAIL_WARMUP tripadvisorId={} url={} message=Visiting homepage for DataDome cookie warming",
                     listing.tripadvisorId(), listing.url());
             page.navigate(TRIPADVISOR_HOMEPAGE, new Page.NavigateOptions()
                     .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
@@ -112,25 +91,24 @@ public class HotelDetailWorker {
             if (warmupOk) {
                 performHumanBehavior(page);
             } else {
-                log.warn("TRIPADVISOR_HOTEL_DETAIL_WARMUP_WARNING tripadvisorId={} url={} message=Homepage warmup may not have fully resolved",
+                log.warn("TRIPADVISOR_RESTAURANT_DETAIL_WARMUP_WARNING tripadvisorId={} url={} message=Homepage warmup may not have fully resolved",
                         listing.tripadvisorId(), listing.url());
             }
-            randomDelay.pause();
+            pause();
 
-            // Navigate to the hotel detail page
-            log.info("TRIPADVISOR_HOTEL_DETAIL_NAVIGATE tripadvisorId={} url={} message=Navigating to hotel detail page",
+            // Navigate to the restaurant detail page
+            log.info("TRIPADVISOR_RESTAURANT_DETAIL_NAVIGATE tripadvisorId={} url={} message=Navigating to restaurant detail page",
                     listing.tripadvisorId(), listing.url());
             page.navigate(listing.url(), new Page.NavigateOptions()
                     .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
                     .setTimeout(properties.navigationTimeoutMs()));
 
-            boolean contentReady = waitForRealContent(page, listing, startedAt, "HOTEL_DETAIL");
+            boolean contentReady = waitForRealContent(page, listing, startedAt, "RESTAURANT_DETAIL");
 
-            // Retry with reload if blocked
             if (!contentReady) {
-                log.warn("TRIPADVISOR_HOTEL_DETAIL_RETRY_RELOAD tripadvisorId={} url={} message=Content not found, reloading page (retry 1)",
+                log.warn("TRIPADVISOR_RESTAURANT_DETAIL_RETRY_RELOAD tripadvisorId={} url={} message=Content not found, reloading page (retry 1)",
                         listing.tripadvisorId(), listing.url());
-                randomDelay.pause();
+                pause();
                 try {
                     page.reload(new Page.ReloadOptions()
                             .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
@@ -141,18 +119,17 @@ public class HotelDetailWorker {
                 contentReady = waitForRealContent(page, listing, startedAt, "RETRY1");
             }
 
-            // Full retry — re-warmup then re-navigate
             if (!contentReady) {
-                log.warn("TRIPADVISOR_HOTEL_DETAIL_RETRY_FULL tripadvisorId={} url={} message=Content still not found, doing full re-warmup + re-navigate (retry 2)",
+                log.warn("TRIPADVISOR_RESTAURANT_DETAIL_RETRY_FULL tripadvisorId={} url={} message=Content still not found, doing full re-warmup + re-navigate (retry 2)",
                         listing.tripadvisorId(), listing.url());
-                randomDelay.pause();
+                pause();
                 try {
                     page.navigate(TRIPADVISOR_HOMEPAGE, new Page.NavigateOptions()
                             .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
                             .setTimeout(properties.navigationTimeoutMs()));
                     waitForRealContent(page, listing, startedAt, "RETRY_WARMUP");
                     performHumanBehavior(page);
-                    randomDelay.pause();
+                    pause();
                     page.navigate(listing.url(), new Page.NavigateOptions()
                             .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
                             .setTimeout(properties.navigationTimeoutMs()));
@@ -163,8 +140,6 @@ public class HotelDetailWorker {
             }
 
             performHumanBehavior(page);
-
-            // Give SPA a moment to render
             try {
                 Thread.sleep(2000);
             } catch (InterruptedException e) {
@@ -176,59 +151,53 @@ public class HotelDetailWorker {
             boolean stillBlocked = isDataDomeChallenge(html, title);
             String snapshotPath = saveHtmlSnapshot(listing, html);
 
-            log.info("TRIPADVISOR_HOTEL_DETAIL_FETCHED tripadvisorId={} url={} title='{}' htmlChars={} htmlBytes={} stillBlocked={} snapshotPath={} elapsedMs={}",
+            log.info("TRIPADVISOR_RESTAURANT_DETAIL_FETCHED tripadvisorId={} url={} title='{}' htmlChars={} htmlBytes={} stillBlocked={} snapshotPath={} elapsedMs={}",
                     listing.tripadvisorId(), listing.url(), title, html == null ? 0 : html.length(),
                     byteSize(html), stillBlocked, snapshotPath, elapsedMs(startedAt));
 
             if (stillBlocked) {
-                log.error("TRIPADVISOR_HOTEL_DETAIL_BLOCKED tripadvisorId={} url={} reason='DataDome challenge could not be resolved after all retries' title='{}' htmlChars={} snapshotPath={} elapsedMs={}",
+                log.error("TRIPADVISOR_RESTAURANT_DETAIL_BLOCKED tripadvisorId={} url={} reason='DataDome challenge could not be resolved after all retries' title='{}' htmlChars={} snapshotPath={} elapsedMs={}",
                         listing.tripadvisorId(), listing.url(), title, html == null ? 0 : html.length(), snapshotPath, elapsedMs(startedAt));
-                stopEventLogger.record(stopEventLogger.classifyBlockType(html, title), "HOTEL_DETAIL",
-                        listing.url(), "tripadvisorId=" + listing.tripadvisorId(),
-                        "DataDome challenge could not be resolved after all retries",
-                        title, byteSize(html), "POST_RETRIES");
-                return HotelDetailCrawlResult.failure("DataDome challenge could not be resolved after all retries");
+                return RestaurantDetailCrawlResult.failure("DataDome challenge could not be resolved after all retries");
             }
 
-            HotelDetail detail = hotelDetailParser.parse(html, listing.url(), listing.sourceListingUrl());
-            log.info("TRIPADVISOR_HOTEL_DETAIL_EXTRACTED tripadvisorId={} url={} name='{}' lat={} lon={} rating={} reviewCount={} elapsedMs={}",
+            RestaurantDetail detail = restaurantDetailParser.parse(html, listing.url(), listing.sourceListingUrl());
+            log.info("TRIPADVISOR_RESTAURANT_DETAIL_EXTRACTED tripadvisorId={} url={} name='{}' lat={} lon={} rating={} reviewCount={} imageCount={} elapsedMs={}",
                     detail.tripadvisorId(), detail.url(), detail.name(), detail.latitude(), detail.longitude(),
-                    detail.rating(), detail.reviewCount(), elapsedMs(startedAt));
+                    detail.rating(), detail.reviewCount(),
+                    detail.imageUrls() == null ? 0 : detail.imageUrls().size(), elapsedMs(startedAt));
 
-            int persistedRows = hotelRepository.upsertHotelDetail(detail);
-            log.info("TRIPADVISOR_HOTEL_DETAIL_PERSISTED tripadvisorId={} url={} affectedRows={} elapsedMs={}",
+            int persistedRows = restaurantRepository.upsertRestaurantDetail(detail);
+            log.info("TRIPADVISOR_RESTAURANT_DETAIL_PERSISTED tripadvisorId={} url={} affectedRows={} elapsedMs={}",
                     detail.tripadvisorId(), detail.url(), persistedRows, elapsedMs(startedAt));
 
             int imagesStored = saveImages(detail.tripadvisorId(), detail.imageUrls());
-            log.info("TRIPADVISOR_HOTEL_DETAIL_IMAGES tripadvisorId={} url={} imagesStored={} elapsedMs={}",
+            log.info("TRIPADVISOR_RESTAURANT_DETAIL_IMAGES tripadvisorId={} url={} imagesStored={} elapsedMs={}",
                     detail.tripadvisorId(), detail.url(), imagesStored, elapsedMs(startedAt));
 
-            log.info("TRIPADVISOR_HOTEL_DETAIL_DONE tripadvisorId={} url={} totalElapsedMs={}",
+            log.info("TRIPADVISOR_RESTAURANT_DETAIL_DONE tripadvisorId={} url={} totalElapsedMs={}",
                     detail.tripadvisorId(), detail.url(), elapsedMs(startedAt));
-            return HotelDetailCrawlResult.success(detail);
+            return RestaurantDetailCrawlResult.success(detail);
         } catch (Exception e) {
-            log.error("TRIPADVISOR_HOTEL_DETAIL_FAILED tripadvisorId={} url={} elapsedMs={} errorType={} error={}",
+            log.error("TRIPADVISOR_RESTAURANT_DETAIL_FAILED tripadvisorId={} url={} elapsedMs={} errorType={} error={}",
                     listing.tripadvisorId(), listing.url(), elapsedMs(startedAt), e.getClass().getSimpleName(), e.getMessage(), e);
-            stopEventLogger.record(CrawlerStopEventLogger.TYPE_ERROR, "HOTEL_DETAIL",
-                    listing.url(), "tripadvisorId=" + listing.tripadvisorId(),
-                    e.getClass().getSimpleName() + ": " + e.getMessage(), null, 0, "EXCEPTION");
-            return HotelDetailCrawlResult.failure(e.getClass().getSimpleName() + ": " + e.getMessage());
+            return RestaurantDetailCrawlResult.failure(e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }
-
-    // ==================== DataDome handling ====================
 
     private int saveImages(long tripadvisorId, java.util.List<String> imageUrls) {
         try {
             return imageSaver.save(tripadvisorId, "T", "tripadvisor", imageUrls);
         } catch (Exception e) {
-            log.warn("Tripadvisor hotel image saving failed (non-fatal). tripadvisorId={}, error={}",
+            log.warn("Tripadvisor restaurant image saving failed (non-fatal). tripadvisorId={}, error={}",
                     tripadvisorId, e.getMessage());
             return 0;
         }
     }
 
-    private boolean waitForRealContent(Page page, HotelListing listing, long startedAt, String phase) {
+    // ==================== DataDome handling ====================
+
+    private boolean waitForRealContent(Page page, RestaurantListing listing, long startedAt, String phase) {
         long deadline = System.currentTimeMillis() + 45_000;
         int attempt = 0;
         boolean challengeDetected = false;
@@ -239,9 +208,8 @@ public class HotelDetailWorker {
                 String currentHtml = page.content();
                 String currentTitle = page.title();
 
-                // Success: hotel detail content present (title is descriptive, not the challenge title)
                 if (currentHtml.length() > 15_000 && !isDataDomeChallenge(currentHtml, currentTitle)) {
-                    log.info("TRIPADVISOR_HOTEL_DETAIL_CONTENT_FOUND tripadvisorId={} url={} phase={} attempt={} title='{}' htmlLen={}",
+                    log.info("TRIPADVISOR_RESTAURANT_DETAIL_CONTENT_FOUND tripadvisorId={} url={} phase={} attempt={} title='{}' htmlLen={}",
                             listing.tripadvisorId(), listing.url(), phase, attempt, currentTitle, currentHtml.length());
                     return true;
                 }
@@ -249,7 +217,7 @@ public class HotelDetailWorker {
                 if (isDataDomeChallenge(currentHtml, currentTitle)) {
                     if (!challengeDetected) {
                         challengeDetected = true;
-                        log.info("TRIPADVISOR_HOTEL_DETAIL_DATADOME_DETECTED tripadvisorId={} url={} phase={} attempt={} title='{}' htmlLen={}",
+                        log.info("TRIPADVISOR_RESTAURANT_DETAIL_DATADOME_DETECTED tripadvisorId={} url={} phase={} attempt={} title='{}' htmlLen={}",
                                 listing.tripadvisorId(), listing.url(), phase, attempt, currentTitle, currentHtml.length());
                     }
                 }
@@ -265,7 +233,7 @@ public class HotelDetailWorker {
             }
         }
 
-        log.warn("TRIPADVISOR_HOTEL_DETAIL_CONTENT_TIMEOUT tripadvisorId={} url={} phase={} attempts={}",
+        log.warn("TRIPADVISOR_RESTAURANT_DETAIL_CONTENT_TIMEOUT tripadvisorId={} url={} phase={} attempts={}",
                 listing.tripadvisorId(), listing.url(), phase, attempt);
         return false;
     }
@@ -293,7 +261,7 @@ public class HotelDetailWorker {
 
     private void performHumanBehavior(Page page) {
         try {
-            randomDelay.pause();
+            pause();
             int x1 = 100 + (int) (Math.random() * 800);
             int y1 = 100 + (int) (Math.random() * 400);
             page.mouse().move(x1, y1);
@@ -393,19 +361,35 @@ public class HotelDetailWorker {
 
     // ==================== Helpers ====================
 
+    private void pause() {
+        long min = properties.minDelayMs();
+        long max = properties.maxDelayMs();
+        long delay = max <= min ? min : ThreadLocalRandom.current().nextLong(min, max + 1);
+        if (delay <= 0) {
+            return;
+        }
+        try {
+            log.info("Tripadvisor restaurant crawler delay: sleeping {}ms before next request", delay);
+            Thread.sleep(delay);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted during Tripadvisor restaurant crawler delay", e);
+        }
+    }
+
     private int byteSize(String value) {
         return value == null ? 0 : value.getBytes(StandardCharsets.UTF_8).length;
     }
 
-    private String saveHtmlSnapshot(HotelListing listing, String html) {
+    private String saveHtmlSnapshot(RestaurantListing listing, String html) {
         try {
-            Files.createDirectories(Path.of("data", "tripadvisor-debug", "hotels"));
-            Path path = Path.of("data", "tripadvisor-debug", "hotels",
-                    "hotel-" + listing.tripadvisorId() + ".html");
+            Files.createDirectories(Path.of("data", "tripadvisor-debug", "restaurants"));
+            Path path = Path.of("data", "tripadvisor-debug", "restaurants",
+                    "restaurant-" + listing.tripadvisorId() + ".html");
             Files.writeString(path, html == null ? "" : html, StandardCharsets.UTF_8);
             return path.toString();
         } catch (Exception e) {
-            log.warn("Failed to save Tripadvisor hotel detail HTML snapshot. tripadvisorId={}, error={}",
+            log.warn("Failed to save Tripadvisor restaurant detail HTML snapshot. tripadvisorId={}, error={}",
                     listing.tripadvisorId(), e.getMessage());
             return "<not-saved>";
         }
