@@ -31,3 +31,11 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Orenda runtime artifacts (do not commit) ###
+/.last_sync_timestamp
+/exports/
+/data/tripadvisor-browser-profile/
+/data/tripadvisor-crawl-stops.csv
+/data/tripadvisor-debug/
+/data/tripadvisor-images/
