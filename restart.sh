@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-export JAVA_HOME="${JAVA_HOME:-$HOME/.local/java/jdk-25.0.4+7}"
+export JAVA_HOME="${JAVA_HOME:-$HOME/.local/java/jdk-21.0.12.1+1}"
 PORT="${PORT:-8081}"
 
 echo "Stopping app on port $PORT..."

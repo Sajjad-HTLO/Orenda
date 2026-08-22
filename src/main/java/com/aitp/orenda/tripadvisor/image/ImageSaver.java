@@ -1,5 +1,6 @@
 package com.aitp.orenda.tripadvisor.image;
 
+import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -23,6 +24,7 @@ public class ImageSaver {
 
     private final ImageDownloader downloader;
     private final ImageRepository imageRepository;
+    private final DiskSpaceGuard diskSpaceGuard;
     private final int maxImagesPerPoi;
     private final boolean enabled;
     private final Path baseDir;
@@ -30,11 +32,13 @@ public class ImageSaver {
     public ImageSaver(
             ImageDownloader downloader,
             ImageRepository imageRepository,
+            DiskSpaceGuard diskSpaceGuard,
             @Value("${tripadvisor.crawler.image-download.max-images-per-poi:50}") int maxImagesPerPoi,
             @Value("${tripadvisor.crawler.image-download.enabled:true}") boolean enabled,
             @Value("${tripadvisor.crawler.image-download.base-dir:data/tripadvisor-images}") String baseDir) {
         this.downloader = downloader;
         this.imageRepository = imageRepository;
+        this.diskSpaceGuard = diskSpaceGuard;
         this.maxImagesPerPoi = Math.max(1, maxImagesPerPoi);
         this.enabled = enabled;
         this.baseDir = Path.of(baseDir);
@@ -68,6 +72,12 @@ public class ImageSaver {
                 break;
             }
             considered++;
+            if (!diskSpaceGuard.hasEnoughSpace(poiDir)) {
+                log.warn("Tripadvisor image saver stopped: free disk space is below {} bytes (available={}) for osmId={}. " +
+                                "The crawler will continue without images; free space to resume image downloads.",
+                        diskSpaceGuard.minFreeBytes(), diskSpaceGuard.freeBytes(poiDir), osmId);
+                break;
+            }
             try {
                 ImageDownloader.ImageData data = downloader.download(url);
                 if (data == null) {

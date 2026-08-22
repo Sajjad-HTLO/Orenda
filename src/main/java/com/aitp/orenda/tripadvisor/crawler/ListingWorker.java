@@ -14,6 +14,7 @@ import com.aitp.orenda.tripadvisor.model.ListingParseResult;
 import com.aitp.orenda.tripadvisor.parser.ListingParser;
 import com.aitp.orenda.tripadvisor.repository.HotelRepository;
 import com.aitp.orenda.tripadvisor.repository.PageRepository;
+import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import com.aitp.orenda.tripadvisor.util.RandomDelay;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -43,6 +44,7 @@ public class ListingWorker {
     private final PageRepository pageRepository;
     private final RandomDelay randomDelay;
     private final CrawlerStopEventLogger stopEventLogger;
+    private final DiskSpaceGuard diskSpaceGuard;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ListingWorker(
@@ -51,13 +53,15 @@ public class ListingWorker {
             HotelRepository hotelRepository,
             PageRepository pageRepository,
             RandomDelay randomDelay,
-            CrawlerStopEventLogger stopEventLogger) {
+            CrawlerStopEventLogger stopEventLogger,
+            DiskSpaceGuard diskSpaceGuard) {
         this.properties = properties;
         this.listingParser = listingParser;
         this.hotelRepository = hotelRepository;
         this.pageRepository = pageRepository;
         this.randomDelay = randomDelay;
         this.stopEventLogger = stopEventLogger;
+        this.diskSpaceGuard = diskSpaceGuard;
     }
 
     public ListingCrawlResult crawl(CrawlPage crawlPage) {
@@ -80,6 +84,20 @@ public class ListingWorker {
         }
 
         Path userDataDir = ensureUserDataDir();
+        if (!diskSpaceGuard.hasEnoughSpace(userDataDir)) {
+            log.error("TRIPADVISOR_DISK_FULL url={} offset={} message=Free disk space {} bytes is below minimum {} bytes. " +
+                            "Skipping page to avoid Chromium 'Target crashed'.",
+                    crawlPage.url(), crawlPage.offset(), diskSpaceGuard.freeBytes(userDataDir), diskSpaceGuard.minFreeBytes());
+            if (!properties.singlePageOnly()) {
+                pageRepository.markFailed(crawlPage.offset(), crawlPage.url(),
+                        new RuntimeException("Disk space too low to launch browser"));
+            }
+            stopEventLogger.record(CrawlerStopEventLogger.TYPE_ERROR, "LISTING", crawlPage.url(),
+                    "offset=" + crawlPage.offset(), "Disk space too low to launch browser", null, 0, "DISK_FULL");
+            return ListingCrawlResult.failed(crawlPage,
+                    new RuntimeException("Disk space too low to launch browser; free at least "
+                            + diskSpaceGuard.minFreeBytes() + " bytes"));
+        }
         String chromePath = resolveChromeExecutable();
         logProgress("BROWSER_OPEN", crawlPage, startedAt,
                 "Opening system Google Chrome with persistent profile. headless=%s timeoutMs=%d chromePath=%s userDataDir=%s"

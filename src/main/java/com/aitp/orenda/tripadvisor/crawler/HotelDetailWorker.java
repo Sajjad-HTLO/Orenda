@@ -12,6 +12,7 @@ import com.aitp.orenda.tripadvisor.model.HotelListing;
 import com.aitp.orenda.tripadvisor.parser.HotelDetailParser;
 import com.aitp.orenda.tripadvisor.repository.HotelRepository;
 import com.aitp.orenda.tripadvisor.image.ImageSaver;
+import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import com.aitp.orenda.tripadvisor.util.RandomDelay;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -47,6 +48,7 @@ public class HotelDetailWorker {
     private final ImageSaver imageSaver;
     private final RandomDelay randomDelay;
     private final CrawlerStopEventLogger stopEventLogger;
+    private final DiskSpaceGuard diskSpaceGuard;
 
     public HotelDetailWorker(
             TripadvisorCrawlerProperties properties,
@@ -54,13 +56,15 @@ public class HotelDetailWorker {
             HotelRepository hotelRepository,
             ImageSaver imageSaver,
             RandomDelay randomDelay,
-            CrawlerStopEventLogger stopEventLogger) {
+            CrawlerStopEventLogger stopEventLogger,
+            DiskSpaceGuard diskSpaceGuard) {
         this.properties = properties;
         this.hotelDetailParser = hotelDetailParser;
         this.hotelRepository = hotelRepository;
         this.imageSaver = imageSaver;
         this.randomDelay = randomDelay;
         this.stopEventLogger = stopEventLogger;
+        this.diskSpaceGuard = diskSpaceGuard;
     }
 
     /**
@@ -75,6 +79,15 @@ public class HotelDetailWorker {
                 listing.tripadvisorId(), listing.url(), listing.sourceListingUrl());
 
         Path userDataDir = ensureUserDataDir();
+        if (!diskSpaceGuard.hasEnoughSpace(userDataDir)) {
+            log.error("TRIPADVISOR_HOTEL_DETAIL_DISK_FULL tripadvisorId={} url={} message=Free disk space {} bytes is below minimum {} bytes. " +
+                            "Skipping to avoid Chromium 'Target crashed'.",
+                    listing.tripadvisorId(), listing.url(), diskSpaceGuard.freeBytes(userDataDir), diskSpaceGuard.minFreeBytes());
+            stopEventLogger.record(CrawlerStopEventLogger.TYPE_ERROR, "HOTEL_DETAIL", listing.url(),
+                    "tripadvisorId=" + listing.tripadvisorId(), "Disk space too low to launch browser", null, 0, "DISK_FULL");
+            return HotelDetailCrawlResult.failure(
+                    "Disk space too low to launch browser; free at least " + diskSpaceGuard.minFreeBytes() + " bytes");
+        }
         String chromePath = resolveChromeExecutable();
 
         List<String> launchArgs = new java.util.ArrayList<>(minimalChromeArgs());

@@ -6,6 +6,7 @@ import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.options.WaitUntilState;
 import com.aitp.orenda.tripadvisor.image.ImageSaver;
+import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -36,16 +37,19 @@ public class RestaurantDetailWorker {
     private final RestaurantDetailParser restaurantDetailParser;
     private final RestaurantRepository restaurantRepository;
     private final ImageSaver imageSaver;
+    private final DiskSpaceGuard diskSpaceGuard;
 
     public RestaurantDetailWorker(
             RestaurantCrawlerProperties properties,
             RestaurantDetailParser restaurantDetailParser,
             RestaurantRepository restaurantRepository,
-            ImageSaver imageSaver) {
+            ImageSaver imageSaver,
+            DiskSpaceGuard diskSpaceGuard) {
         this.properties = properties;
         this.restaurantDetailParser = restaurantDetailParser;
         this.restaurantRepository = restaurantRepository;
         this.imageSaver = imageSaver;
+        this.diskSpaceGuard = diskSpaceGuard;
     }
 
     public RestaurantDetailCrawlResult crawl(RestaurantListing listing) {
@@ -54,6 +58,13 @@ public class RestaurantDetailWorker {
                 listing.tripadvisorId(), listing.url(), listing.sourceListingUrl());
 
         Path userDataDir = ensureUserDataDir();
+        if (!diskSpaceGuard.hasEnoughSpace(userDataDir)) {
+            log.error("TRIPADVISOR_RESTAURANT_DETAIL_DISK_FULL tripadvisorId={} url={} message=Free disk space {} bytes is below minimum {} bytes. " +
+                            "Skipping to avoid Chromium 'Target crashed'.",
+                    listing.tripadvisorId(), listing.url(), diskSpaceGuard.freeBytes(userDataDir), diskSpaceGuard.minFreeBytes());
+            return RestaurantDetailCrawlResult.failure(
+                    "Disk space too low to launch browser; free at least " + diskSpaceGuard.minFreeBytes() + " bytes");
+        }
         String chromePath = resolveChromeExecutable();
 
         List<String> launchArgs = new java.util.ArrayList<>(minimalChromeArgs());

@@ -39,3 +39,5 @@ build/
 /data/tripadvisor-crawl-stops.csv
 /data/tripadvisor-debug/
 /data/tripadvisor-images/
+/data/tripadvisor-images-archive/
+/logs/
