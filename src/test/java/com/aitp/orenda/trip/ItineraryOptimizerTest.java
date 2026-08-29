@@ -7,6 +7,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.Map;
 
@@ -200,6 +201,71 @@ class ItineraryOptimizerTest {
                 req, 2, 41.0082, 28.9784, TripWeather.empty());
 
         assertThat(plan).isEmpty();
+    }
+
+    @Test
+    void arrival_time_starts_day_one_after_check_in() {
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+        TripPlanRequest req = balancedRequest();
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(poi("11111111-1111-1111-1111-111111111111", "culture", "museum", Map.of()), 80)),
+                req, 1, 41.0082, 28.9784, TripWeather.empty(),
+                LocalTime.of(14, 30), null);
+
+        // 14:30 arrival + 10 min travel → first stop at 14:40, ends 16:40 (museum = 120 min).
+        assertThat(plan.get(0).getItems()).hasSize(1);
+        assertThat(plan.get(0).getItems().get(0).getStartTime()).isEqualTo("14:40");
+        assertThat(plan.get(0).getItems().get(0).getEndTime()).isEqualTo("16:40");
+        assertThat(plan.get(0).getNotes()).anyMatch(n -> n.contains("Arriving at 14:30"));
+    }
+
+    @Test
+    void departure_time_trims_stops_that_would_end_after_departure() {
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+        when(travelTimeEstimator.minutesBetween(anyDouble(), anyDouble(), anyDouble(), anyDouble(), any()))
+                .thenAnswer(inv -> (double) inv.getArgument(2) > 41.02 ? 10.0 : 5.0);
+
+        TripPlanRequest req = balancedRequest();
+        PoiResponse museum = poi("11111111-1111-1111-1111-111111111111", "culture", "museum", Map.of());
+        PoiResponse castle = poi("22222222-2222-2222-2222-222222222222", "historic", "castle", Map.of());
+        castle.setLat(41.0201);
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(castle, 90), scored(museum, 80)),
+                req, 1, 41.0082, 28.9784, TripWeather.empty(),
+                null, LocalTime.of(12, 0));
+
+        // Museum: 09:30+5 → 09:35..11:35 (fits before 12:00). Castle: would end 13:35 → dropped.
+        assertThat(plan.get(0).getItems()).extracting(i -> i.getPoi().getSubcategory())
+                .containsExactly("museum");
+        assertThat(plan.get(0).getNotes()).anyMatch(n -> n.contains("Departing at 12:00"));
+    }
+
+    @Test
+    void children_count_tightens_the_walking_budget_even_without_age_ranges() {
+        when(travelTimeEstimator.minutesBetween(anyDouble(), anyDouble(), anyDouble(), anyDouble(), any()))
+                .thenAnswer(inv -> (double) inv.getArgument(2) > 41.03 ? 20.0 : 5.0);
+        when(travelTimeEstimator.distanceKm(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
+                .thenAnswer(inv -> (double) inv.getArgument(2) > 41.03 ? 5.0 : 0.5);
+
+        ItineraryOptimizer optimizer = new ItineraryOptimizer(travelTimeEstimator);
+        TripPlanRequest req = balancedRequest();
+        req.getBasics().setTransportMode(TripEnums.TransportMode.FOOT);
+        req.getBasics().setChildrenCount(2);
+        req.getProfile().setGroupType(TripEnums.GroupType.FAMILY);
+
+        PoiResponse near = poi("11111111-1111-1111-1111-111111111111", "culture", "museum", Map.of());
+        PoiResponse far = poi("22222222-2222-2222-2222-222222222222", "nature", "park", Map.of());
+        far.setLat(41.0500);
+
+        List<TripPlanResponse.DayPlan> plan = optimizer.build(
+                List.of(scored(far, 90), scored(near, 80)), req, 1, 41.0082, 28.9784, TripWeather.empty());
+
+        // Family MODERATE walk budget = 6 * 0.8 = 4.8 km; the 5 km leg is skipped
+        // because childrenCount=2 counts as having children.
+        assertThat(plan.get(0).getItems()).extracting(i -> i.getPoi().getSubcategory())
+                .containsExactly("museum");
     }
 
     private TripPlanRequest balancedRequest() {

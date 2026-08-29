@@ -15,6 +15,8 @@ class TripWeatherTest {
     private static final WeatherResponse.DailyForecast RAIN_CODE = day("2026-08-16", 61, 0.0);
     private static final WeatherResponse.DailyForecast RAIN_PRECIP = day("2026-08-17", 2, 6.4);
     private static final WeatherResponse.DailyForecast DRIZZLE = day("2026-08-18", 55, 0.0);
+    private static final WeatherResponse.DailyForecast SNOW = day("2026-08-19", 73, 0.0);
+    private static final WeatherResponse.DailyForecast SNOW_SHOWER = day("2026-08-20", 86, 0.0);
 
     // ── Rain / outdoor-suitability lookups ──────────────────────────────────
 
@@ -25,6 +27,13 @@ class TripWeatherTest {
         assertThat(w.isRainy("2026-08-16")).isTrue();   // code 61
         assertThat(w.isRainy("2026-08-17")).isTrue();   // precipitation >= 2.0
         assertThat(w.isRainy("2026-08-18")).isTrue();   // code 55 (51..67)
+    }
+
+    @Test
+    void isRainy_also_treats_snow_as_bad_weather() {
+        TripWeather w = new TripWeather(List.of(SNOW, SNOW_SHOWER));
+        assertThat(w.isRainy("2026-08-19")).isTrue();   // code 73 (71..77)
+        assertThat(w.isRainy("2026-08-20")).isTrue();   // code 86 (snow shower)
     }
 
     @Test
