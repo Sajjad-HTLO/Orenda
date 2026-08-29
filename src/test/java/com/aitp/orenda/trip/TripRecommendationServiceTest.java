@@ -59,7 +59,7 @@ class TripRecommendationServiceTest {
                 .thenReturn(10.0);
         lenient().when(travelTimeEstimator.distanceKm(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
                 .thenReturn(0.5);
-        lenient().when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any()))
+        lenient().when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any(), any(), any()))
                 .thenReturn(List.of());
         lenient().when(itineraryNarrator.narrate(any(), any(), any(), any(), any(), any(), any(), anyDouble()))
                 .thenReturn(new ItineraryNarrator.NarrativeOutput("", List.of()));
@@ -396,7 +396,7 @@ class TripRecommendationServiceTest {
 
         when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
                 .thenReturn(List.of(museumPoi()));
-        when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any()))
+        when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any(), any(), any()))
                 .thenReturn(List.of(dayPlan));
         when(lunchPlanner.plan(any(), any(), anyDouble(), anyDouble())).thenReturn(lunch);
 
@@ -569,7 +569,7 @@ class TripRecommendationServiceTest {
 
         when(poiRepository.findNearby(anyDouble(), anyDouble(), anyDouble(), isNull(), anyInt(), anyInt()))
                 .thenReturn(List.of(museumPoi()));
-        when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any()))
+        when(itineraryOptimizer.build(any(), any(), anyInt(), anyDouble(), anyDouble(), any(), any(), any()))
                 .thenReturn(List.of(dayPlan));
         when(lunchPlanner.plan(any(), any(), anyDouble(), anyDouble())).thenReturn(lunch);
         when(itineraryNarrator.narrate(any(), any(), any(), any(), any(), any(), any(), anyDouble()))

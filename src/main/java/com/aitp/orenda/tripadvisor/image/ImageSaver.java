@@ -57,12 +57,6 @@ public class ImageSaver {
             return 0;
         }
         Path poiDir = baseDir.resolve(String.valueOf(osmId));
-        try {
-            Files.createDirectories(poiDir);
-        } catch (IOException e) {
-            log.warn("Tripadvisor image saver: cannot create directory {}. error={}", poiDir, e.getMessage());
-            return 0;
-        }
 
         int saved = 0;
         int considered = 0;
@@ -83,6 +77,9 @@ public class ImageSaver {
                 if (data == null) {
                     continue;
                 }
+                if (!ensureDir(poiDir)) {
+                    return 0;
+                }
                 Path file = writeFile(poiDir, data);
                 if (file == null) {
                     continue;
@@ -98,6 +95,16 @@ public class ImageSaver {
         log.info("Tripadvisor image saver done. osmId={}, osmType={}, source={}, imageUrls={}, considered={}, stored={}, dir={}",
                 osmId, osmType, source, imageUrls.size(), considered, saved, poiDir);
         return saved;
+    }
+
+    private boolean ensureDir(Path poiDir) {
+        try {
+            Files.createDirectories(poiDir);
+            return true;
+        } catch (IOException e) {
+            log.warn("Tripadvisor image saver: cannot create directory {}. error={}", poiDir, e.getMessage());
+            return false;
+        }
     }
 
     private Path writeFile(Path poiDir, ImageDownloader.ImageData data) throws IOException {

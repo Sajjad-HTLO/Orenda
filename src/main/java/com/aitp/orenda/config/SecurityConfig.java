@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -33,6 +34,10 @@ public class SecurityConfig {
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/me").authenticated()
+                        .requestMatchers("/api/trips/plan").permitAll()
+                        .requestMatchers("/api/trips/**").authenticated()
+                        .requestMatchers("/api/users/profile").authenticated()
+                        .requestMatchers(HttpMethod.POST, "/api/pois/*/reviews").authenticated()
                         .anyRequest().permitAll())
                 .exceptionHandling(ex -> ex.authenticationEntryPoint((request, response, authException) -> {
                     response.setStatus(401);

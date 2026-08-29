@@ -22,7 +22,8 @@ public class UserRepository {
     private static final String COLUMNS = """
             id, email, password_hash, full_name, email_verified, auth_provider,
             google_sub, verification_token, verification_token_expires_at,
-            last_login_at, created_at, updated_at
+            last_login_at, created_at, updated_at, avatar_url, home_city,
+            dietary_restrictions
             """;
 
     private static final RowMapper<UserEntity> ROW_MAPPER = (rs, rowNum) -> UserEntity.builder()
@@ -38,6 +39,10 @@ public class UserRepository {
             .lastLoginAt(toInstant(rs.getObject("last_login_at", OffsetDateTime.class)))
             .createdAt(toInstant(rs.getObject("created_at", OffsetDateTime.class)))
             .updatedAt(toInstant(rs.getObject("updated_at", OffsetDateTime.class)))
+            .avatarUrl(rs.getString("avatar_url"))
+            .homeCity(rs.getString("home_city"))
+            .dietaryRestrictions(rs.getArray("dietary_restrictions") == null ? null
+                    : (String[]) rs.getArray("dietary_restrictions").getArray())
             .build();
 
     @Transactional
@@ -133,6 +138,31 @@ public class UserRepository {
                         WHERE id = ?
                         """,
                 googleSub, userId);
+    }
+
+    @Transactional
+    public void updateProfile(UUID userId, String fullName, String avatarUrl,
+                              String homeCity, String[] dietaryRestrictions) {
+        jdbc.execute("""
+                        UPDATE app_user
+                        SET full_name = ?,
+                            avatar_url = ?,
+                            home_city = ?,
+                            dietary_restrictions = ?,
+                            updated_at = NOW()
+                        WHERE id = ?
+                        """, (org.springframework.jdbc.core.PreparedStatementCallback<Integer>) ps -> {
+            ps.setString(1, fullName);
+            ps.setString(2, avatarUrl);
+            ps.setString(3, homeCity);
+            if (dietaryRestrictions == null) {
+                ps.setNull(4, java.sql.Types.ARRAY);
+            } else {
+                ps.setArray(4, ps.getConnection().createArrayOf("text", dietaryRestrictions));
+            }
+            ps.setObject(5, userId);
+            return ps.executeUpdate();
+        });
     }
 
     // ── OAuth state (login CSRF protection) ─────────────────────────────────

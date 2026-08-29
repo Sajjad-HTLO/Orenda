@@ -151,12 +151,6 @@ public class AuthService {
     }
 
     public static UserResponse toResponse(UserEntity user) {
-        return new UserResponse(
-                user.getId(),
-                user.getEmail(),
-                user.getFullName(),
-                user.isEmailVerified(),
-                user.getAuthProvider(),
-                user.getCreatedAt());
+        return UserResponse.of(user);
     }
 }

@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -128,9 +129,13 @@ public class TripRecommendationService {
                 .limit(DEFAULT_LIMIT)
                 .toList();
 
-        // 6. Optimization → ordered, timed day-by-day itinerary
+        // 6. Optimization → ordered, timed day-by-day itinerary. If the traveler
+        //    told us when they arrive / depart, day 1 starts after arrival and
+        //    the final day ends before departure.
+        LocalTime arrivalTime = parseTime(req.getBasics().getArrivalTime());
+        LocalTime departureTime = parseTime(req.getBasics().getDepartureTime());
         List<TripPlanResponse.DayPlan> dayPlan = itineraryOptimizer.build(
-                withTravel, req, tripDays, lat, lon, weather);
+                withTravel, req, tripDays, lat, lon, weather, arrivalTime, departureTime);
 
         // 6b. Lunch-time blocks: ask "hotel or nearby restaurant?", collect the
         //     traveler's diet when unknown, and suggest diet-matched restaurants
@@ -139,7 +144,13 @@ public class TripRecommendationService {
 
         // 7. Summary and notes
         String summary = generateSummary(withTravel, req, tripDays);
-        List<String> notes = generateNotes(withTravel, req, weather, tripDays, constraints);
+        List<String> notes = new ArrayList<>(generateNotes(withTravel, req, weather, tripDays, constraints));
+        if (arrivalTime != null) {
+            notes.add("You arrive at " + arrivalTime + " on day 1 — the first day's stops are scheduled after arrival.");
+        }
+        if (departureTime != null) {
+            notes.add("You depart at " + departureTime + " on day " + tripDays + " — that day's itinerary ends by then.");
+        }
         String weatherSummary = generateWeatherSummary(weather, startDate, tripDays);
         String preferenceInsight = preferenceService.insightFor(prefWeights);
 
@@ -392,7 +403,7 @@ public class TripRecommendationService {
 
         return TripPlanResponse.ScoredPoi.builder()
                 .poi(scored.getPoi())
-                .score(Math.round((scored.getScore() + travelFactor) * 100.0) / 100.0)
+                .score(Math.min(100.0, Math.round((scored.getScore() + travelFactor) * 100.0) / 100.0))
                 .factors(factors)
                 .reasons(reasons)
                 .build();
@@ -929,6 +940,22 @@ public class TripRecommendationService {
 
     private double randomFactor() {
         return (Math.random() - 0.5) * 2; // -1 to +1
+    }
+
+    /**
+     * Parses a free-form "HH:mm" arrival/departure time; null when absent or
+     * malformed so the planner falls back to its defaults.
+     */
+    private LocalTime parseTime(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return java.time.LocalTime.parse(value.trim());
+        } catch (Exception e) {
+            log.warn("Invalid time '{}' — ignoring", value);
+            return null;
+        }
     }
 
     private double[] parseLatLon(String location) {

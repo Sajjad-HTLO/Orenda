@@ -43,6 +43,27 @@ public class ItineraryOptimizer {
             int days,
             double baseLat, double baseLon,
             TripWeather weather) {
+        return build(scored, req, days, baseLat, baseLon, weather, null, null);
+    }
+
+    /**
+     * Same as {@link #build(List, TripPlanRequest, int, double, double, TripWeather)}
+     * but honours the traveler's arrival / departure times:
+     * <ul>
+     *   <li>{@code firstDayStart} — day 1 starts at this time (e.g. hotel check-in
+     *       after the flight arrives) instead of the default 09:30.</li>
+     *   <li>{@code lastDayEnd} — the final day's itinerary ends by this time
+     *       (e.g. departure from the city). Stops that would end after it are
+     *       dropped.</li>
+     * </ul>
+     */
+    public List<TripPlanResponse.DayPlan> build(
+            List<TripPlanResponse.ScoredPoi> scored,
+            TripPlanRequest req,
+            int days,
+            double baseLat, double baseLon,
+            TripWeather weather,
+            LocalTime firstDayStart, LocalTime lastDayEnd) {
 
         if (req.getStyle().getPlanningStyle() == TripEnums.PlanningStyle.RECOMMENDATIONS_ONLY) {
             return Collections.emptyList();
@@ -66,15 +87,23 @@ public class ItineraryOptimizer {
             LocalDate date = start.plusDays(d - 1);
             boolean rainy = weather.isRainy(date.toString());
             boolean outdoorGood = weather.isOutdoorGood(date.toString());
+            LocalTime dayStart = (d == 1 && firstDayStart != null) ? firstDayStart : DAY_START;
+            LocalTime dayEnd = (d == days && lastDayEnd != null) ? lastDayEnd : null;
 
             List<TripPlanResponse.ScoredPoi> dayPool = pickDayPool(remaining, date, rainy, outdoorGood, poisPerDay);
 
             List<TripPlanResponse.ScoredPoi> dayItems = scheduleDay(dayPool, req, date, mode,
-                    baseLat, baseLon, footMode, maxWalkKm, dayTravelBudget, poisPerDay);
+                    baseLat, baseLon, footMode, maxWalkKm, dayTravelBudget, poisPerDay, dayStart, dayEnd);
 
             remaining.removeAll(dayItems);
 
             List<String> notes = dayNotes(dayItems, date, rainy, footMode, maxWalkKm, mode);
+            if (d == 1 && firstDayStart != null) {
+                notes.add("Arriving at " + firstDayStart.format(TIME) + " — day 1 starts after arrival.");
+            }
+            if (d == days && lastDayEnd != null) {
+                notes.add("Departing at " + lastDayEnd.format(TIME) + " — day " + days + " ends by then.");
+            }
             plan.add(TripPlanResponse.DayPlan.builder()
                     .day(d)
                     .date(date.toString())
@@ -116,14 +145,16 @@ public class ItineraryOptimizer {
                                                          TripEnums.TransportMode mode,
                                                          double baseLat, double baseLon,
                                                          boolean footMode, double maxWalkKm,
-                                                         double dayTravelBudget, int poisPerDay) {
+                                                         double dayTravelBudget, int poisPerDay,
+                                                         LocalTime dayStart, LocalTime dayEnd) {
         List<TripPlanResponse.ScoredPoi> dayItems = new ArrayList<>();
         List<TripPlanResponse.ScoredPoi> pool = new ArrayList<>(dayPool);
 
         double prevLat = baseLat;
         double prevLon = baseLon;
         double walkedKm = 0;
-        LocalTime current = DAY_START;
+        double totalTravel = 0;
+        LocalTime current = dayStart;
 
         while (!pool.isEmpty() && dayItems.size() < poisPerDay) {
             TripPlanResponse.ScoredPoi next = nearest(pool, prevLat, prevLon, mode);
@@ -140,16 +171,30 @@ public class ItineraryOptimizer {
             if (footMode && walkedKm + legKm > maxWalkKm) {
                 continue; // walking budget exceeded; try the next nearest instead
             }
-            if (!dayItems.isEmpty() && travel > dayTravelBudget) {
-                continue; // a single leg is too long for this trip's pace
+            if (!dayItems.isEmpty()) {
+                if (travel > dayTravelBudget) {
+                    continue; // a single leg is too long for this trip's pace
+                }
+                // The itinerary is anchored on the hotel: the day's travel loop
+                // (hotel → stops → hotel) must fit the travel budget, so the
+                // return leg to the base counts too.
+                double returnLeg = travelTimeEstimator.minutesBetween(
+                        next.getPoi().getLat(), next.getPoi().getLon(), baseLat, baseLon, mode);
+                if (totalTravel + travel + returnLeg > dayTravelBudget) {
+                    continue;
+                }
             }
 
             int visit = visitMinutes(next.getPoi());
             LocalTime arrival = current.plusMinutes(Math.max(1, Math.round(travel)));
             LocalTime end = arrival.plusMinutes(visit);
+            if (dayEnd != null && end.isAfter(dayEnd)) {
+                continue; // ends after departure — try a shorter visit instead
+            }
 
             dayItems.add(copyWithSchedule(next, travel, visit, arrival, end, date));
             walkedKm += legKm;
+            totalTravel += travel;
             current = end;
             prevLat = next.getPoi().getLat();
             prevLon = next.getPoi().getLon();
@@ -237,9 +282,18 @@ public class ItineraryOptimizer {
             case LOTS -> 10.0;
         };
         boolean hasChildren = req.getProfile().getGroupType() == TripEnums.GroupType.FAMILY
-                && req.getProfile().getChildAgeRanges() != null
-                && !req.getProfile().getChildAgeRanges().isEmpty();
+                && (hasChildAgeRanges(req) || hasChildCount(req));
         return hasChildren ? base * 0.8 : base;
+    }
+
+    private boolean hasChildAgeRanges(TripPlanRequest req) {
+        return req.getProfile().getChildAgeRanges() != null
+                && !req.getProfile().getChildAgeRanges().isEmpty();
+    }
+
+    private boolean hasChildCount(TripPlanRequest req) {
+        Integer count = req.getBasics().getChildrenCount();
+        return count != null && count > 0;
     }
 
     private double dailyTravelBudgetMinutes(TripPlanRequest req) {

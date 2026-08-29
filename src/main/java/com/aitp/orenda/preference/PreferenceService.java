@@ -251,7 +251,7 @@ public class PreferenceService {
             case LOVE -> "Noted — adding more places like this to your recommendations.";
             case LIKE -> "Got it — this counts toward your preferences.";
             case DISLIKE -> "Understood — this type will rank lower for you.";
-            case NOT_INTERESTED -> "Removed — this won't be suggested again.";
+            case NOT_INTERESTED -> "Noted — I'll suggest fewer places like this going forward.";
             case RATED -> "Thanks for the rating!";
         };
     }

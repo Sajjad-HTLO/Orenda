@@ -1,0 +1,776 @@
+================================================================================
+                           ORENDA API SPECIFICATION
+================================================================================
+
+API Title: Orenda API
+Description: Turkey-focused "Travel Operating System" — Spring Boot backend.
+             POI discovery/search, weather, routing, trip planning, user 
+             preferences, profile onboarding, and data-import triggers.
+Version: 0.0.1-SNAPSHOT
+Contact: Orenda
+
+================================================================================
+                                SERVERS
+================================================================================
+
+1. Deployed server url 
+   URL: https://orenda-d9qj.onrender.com
+
+================================================================================
+                                 TAGS
+================================================================================
+
+1. Auth
+   Description: User management, JWT, email verification, Google OAuth
+
+2. POI
+   Description: Point-of-interest discovery, search, categories, feedback
+
+3. Weather
+   Description: Current conditions + daily forecast (Open-Meteo)
+
+4. Routing
+   Description: Point-to-point routing (OSRM)
+
+5. Trip Planner
+   Description: Ranked POI suggestions and day-by-day trip plans
+
+6. Preferences
+   Description: Learned per-category preference weights and feedback
+
+7. Profile
+   Description: Long-term traveler onboarding profile
+
+8. Imports
+   Description: Manually trigger background data-import jobs
+
+Security: No global security (varies per endpoint)
+
+================================================================================
+                                 ENDPOINTS
+================================================================================
+
+------------------------------ AUTH ENDPOINTS ------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/auth/signup                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Auth                                                                 │
+│ Summary: Create an account and email a verification link                   │
+│ Operation ID: signup                                                       │
+│                                                                             │
+│ Request Body (application/json):                                           │
+│   SignupRequest:                                                           │
+│   - email: string (email format) [REQUIRED]                               │
+│   - password: string (min 6, max 72 chars) [REQUIRED]                    │
+│   - fullName: string (max 200 chars)                                     │
+│                                                                             │
+│ Responses:                                                                 │
+│   201 - Account created (SignupResponse)                                  │
+│   400 - Validation error (ApiError)                                       │
+│   409 - Email already exists (ApiError)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/auth/verify-email                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Auth                                                                 │
+│ Summary: Confirm an email address with a verification token                │
+│ Operation ID: verifyEmail                                                  │
+│                                                                             │
+│ Parameters (query):                                                        │
+│   - token: string [REQUIRED] - One-time email verification token          │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Email verified (VerifyEmailResponse)                              │
+│   400 - Invalid verification token (ApiError)                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/auth/login                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Auth                                                                 │
+│ Summary: Exchange credentials for a JWT                                   │
+│ Operation ID: login                                                        │
+│                                                                             │
+│ Request Body (application/json):                                           │
+│   LoginRequest:                                                            │
+│   - email: string (email format) [REQUIRED]                               │
+│   - password: string [REQUIRED]                                           │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Authenticated (AuthResponse)                                      │
+│   400 - Validation error (ApiError)                                       │
+│   401 - Invalid credentials (ApiError)                                    │
+│   403 - Email not verified (ApiError)                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/auth/resend-verification                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Auth                                                                 │
+│ Summary: Re-send the verification email                                   │
+│ Operation ID: resendVerification                                           │
+│                                                                             │
+│ Request Body (application/json):                                           │
+│   ResendVerificationRequest:                                               │
+│   - email: string (email format) [REQUIRED]                               │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Message sent (object with "message" property)                     │
+│   400 - Validation error (ApiError)                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/auth/google                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Auth                                                                 │
+│ Summary: Redirect the browser to Google's account page                    │
+│ Operation ID: googleRedirect                                               │
+│                                                                             │
+│ Responses:                                                                 │
+│   302 - Redirect to Google OAuth consent screen                           │
+│   503 - OAuth not configured (ApiError)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/auth/google/callback                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Auth                                                                 │
+│ Summary: Google OAuth callback; redirects browser to frontend with JWT    │
+│ Operation ID: googleCallback                                               │
+│                                                                             │
+│ Parameters (query):                                                        │
+│   - code: string [REQUIRED]                                               │
+│   - state: string [REQUIRED]                                              │
+│                                                                             │
+│ Responses:                                                                 │
+│   302 - Redirect to frontend with ?token=<jwt> or ?error=...              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/auth/me                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Auth                                                                 │
+│ Summary: Current authenticated user                                       │
+│ Operation ID: me                                                           │
+│ Security: bearerAuth                                                       │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Authenticated user (UserResponse)                                 │
+│   401 - Authentication required                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+------------------------------ POI ENDPOINTS ------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/pois/nearby                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: POI                                                                  │
+│ Summary: POIs within a radius, optionally filtered by category            │
+│ Operation ID: nearbyPois                                                   │
+│                                                                             │
+│ Parameters (query):                                                        │
+│   - lat: double [REQUIRED] - Example: 41.01                              │
+│   - lon: double [REQUIRED] - Example: 28.97                              │
+│   - radiusKm: double (default: 10, max: 50) - Search radius             │
+│   - category: string - Optional category filter                          │
+│   - page: int32 (default: 0)                                             │
+│   - size: int32 (default: 20, max: 100)                                  │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Nearby POIs, nearest first (array of PoiResponse)                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/pois/search                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: POI                                                                  │
+│ Summary: Full-text search over Turkish and English POI names              │
+│ Operation ID: searchPois                                                   │
+│                                                                             │
+│ Parameters (query):                                                        │
+│   - q: string [REQUIRED] - Example: "topkapi"                            │
+│   - page: int32 (default: 0)                                             │
+│   - size: int32 (default: 20, max: 100)                                  │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Matching POIs (array of PoiResponse)                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/pois/categories                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: POI                                                                  │
+│ Summary: All categories and subcategories with POI counts                 │
+│ Operation ID: listCategories                                               │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Category/subcategory rows with counts                             │
+│         Properties: category (string, nullable), subcategory (string,      │
+│         nullable), count (int64)                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/pois/{id}                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: POI                                                                  │
+│ Summary: Single POI by UUID                                               │
+│ Operation ID: getPoiById                                                   │
+│                                                                             │
+│ Parameters (path):                                                         │
+│   - id: string (UUID format) [REQUIRED]                                   │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - The POI (PoiResponse)                                             │
+│   404 - POI not found                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/pois/feedback                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: POI                                                                  │
+│ Summary: Report feedback for a POI and get the nearest alternative         │
+│ Operation ID: submitPoiFeedback                                            │
+│                                                                             │
+│ Request Body (application/json):                                           │
+│   FeedbackRequest:                                                         │
+│   - poiId: string (UUID) [REQUIRED]                                      │
+│   - type: enum [CLOSED, INACCURATE, MOVED, DUPLICATE, OTHER] [REQUIRED] │
+│   - details: string (nullable)                                           │
+│   - sessionId: string (nullable)                                         │
+│   - newLat: double (nullable) - Only for MOVED type                     │
+│   - newLon: double (nullable) - Only for MOVED type                     │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Feedback accepted (FeedbackResponse)                              │
+│   400 - Validation error (ApiError)                                       │
+│   404 - POI not found                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+---------------------------- WEATHER ENDPOINTS ----------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/weather                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Weather                                                              │
+│ Summary: Current conditions and daily forecast for a coordinate            │
+│ Description: Powered by Open-Meteo (free, no API key required).           │
+│              Days is clamped to 1-16.                                      │
+│ Operation ID: getWeather                                                   │
+│                                                                             │
+│ Parameters (query):                                                        │
+│   - lat: double [REQUIRED] - Example: 41.01                              │
+│   - lon: double [REQUIRED] - Example: 28.97                              │
+│   - days: int32 (default: 7, min: 1, max: 16)                            │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Weather data (WeatherResponse)                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+---------------------------- ROUTING ENDPOINTS ---------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/route                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Routing                                                              │
+│ Summary: Point-to-point route between two coordinates                      │
+│ Description: Powered by OSRM public demo server (free, no API key)        │
+│ Operation ID: getRoute                                                     │
+│                                                                             │
+│ Parameters (query):                                                        │
+│   - fromLat: double [REQUIRED] - Example: 41.01                           │
+│   - fromLon: double [REQUIRED] - Example: 28.97                           │
+│   - toLat: double [REQUIRED] - Example: 36.89                             │
+│   - toLon: double [REQUIRED] - Example: 30.71                             │
+│   - profile: enum [driving, foot, bike] (default: driving)               │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Route with GeoJSON geometry (RouteResponse)                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------- TRIP PLANNER ENDPOINTS -----------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/trips/plan                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Trip Planner                                                         │
+│ Summary: Generate a ranked trip plan from the questionnaire               │
+│ Operation ID: planTrip                                                     │
+│                                                                             │
+│ Request Body (application/json):                                           │
+│   TripPlanRequest:                                                         │
+│   - basics: TripBasics [REQUIRED]                                         │
+│   - profile: TripTravelerProfile [REQUIRED]                               │
+│   - interests: TripInterests [REQUIRED]                                   │
+│   - style: TripTravelStyle [REQUIRED]                                     │
+│   - sessionId: string (nullable)                                          │
+│                                                                             │
+│   TripBasics:                                                              │
+│   - destination: string [REQUIRED]                                       │
+│   - startDate: date [REQUIRED]                                           │
+│   - endDate: date [REQUIRED]                                             │
+│   - travelerCount: int32 (min: 1) [REQUIRED]                             │
+│   - childrenCount: int32 (min: 0, nullable)                              │
+│   - accommodationLocation: string [REQUIRED]                             │
+│   - arrivalTime: string (nullable, free-form)                            │
+│   - departureTime: string (nullable, free-form)                          │
+│   - transportMode: enum [DRIVING, FOOT, BIKE, TRANSIT, TAXI] [REQUIRED] │
+│                                                                             │
+│   TripTravelerProfile:                                                     │
+│   - ageRange: enum [UNDER_18, AGE_18_24, AGE_25_34, AGE_35_44,           │
+│     AGE_45_54, AGE_55_64, AGE_65_PLUS, MIXED] [REQUIRED]                │
+│   - groupType: enum [SOLO, COUPLE, FAMILY, FRIENDS] [REQUIRED]           │
+│   - childAgeRanges: array of AgeRange (family only)                     │
+│   - mobilityLimitation: enum [NONE, LIMITED_WALKING, WHEELCHAIR,        │
+│     STROLLER]                                                            │
+│   - diet: enum [NONE, VEGETARIAN, VEGAN, HALAL, GLUTEN_FREE,            │
+│     LACTOSE_FREE]                                                        │
+│                                                                             │
+│   TripInterests:                                                           │
+│   - selectedInterests: array of Interest [REQUIRED]                       │
+│   - additionalNotes: string (nullable)                                   │
+│                                                                             │
+│   Interest enum: [HISTORY, MUSEUMS, NATURE, BEACHES, FOOD, SHOPPING,     │
+│   NIGHTLIFE, PHOTOGRAPHY, ARCHITECTURE, ADVENTURE, LOCAL_CULTURE,        │
+│   LUXURY, HIDDEN_GEMS, FAMILY_ACTIVITIES]                                │
+│                                                                             │
+│   TripTravelStyle:                                                         │
+│   - pace: enum [RELAXED, BALANCED, PACKED] [REQUIRED]                    │
+│   - walking: enum [MINIMAL, MODERATE, LOTS] [REQUIRED]                   │
+│   - budget: enum [BUDGET, MID_RANGE, PREMIUM, LUXURY] [REQUIRED]         │
+│   - food: enum [LOCAL, FINE_DINING, STREET_FOOD, VEGETARIAN, VEGAN,     │
+│     NO_PREFERENCE] [REQUIRED]                                            │
+│   - planningStyle: enum [DETAILED_SCHEDULE, RECOMMENDATIONS_ONLY,        │
+│     SURPRISE_ME] [REQUIRED]                                              │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Ranked suggestions + day plan (TripPlanResponse)                  │
+│   400 - Validation error (ApiError)                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------- PREFERENCES ENDPOINTS -----------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/preferences/{sessionId}                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Preferences                                                          │
+│ Summary: Current learned per-category weights for a session               │
+│ Operation ID: getPreferenceWeights                                         │
+│                                                                             │
+│ Parameters (path):                                                         │
+│   - sessionId: string [REQUIRED]                                          │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Category weights (0..1) (PreferenceWeights)                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/preferences/feedback                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Preferences                                                          │
+│ Summary: Submit like/dislike/love/not-interested/rated feedback for POI    │
+│ Operation ID: submitPreferenceFeedback                                     │
+│                                                                             │
+│ Request Body (application/json):                                           │
+│   PreferenceFeedbackRequest:                                               │
+│   - poiId: string (UUID) [REQUIRED]                                      │
+│   - sessionId: string [REQUIRED]                                         │
+│   - reaction: enum [LIKE, DISLIKE, LOVE, NOT_INTERESTED, RATED]          │
+│     [REQUIRED]                                                           │
+│   - rating: int32 (1-5, nullable) - Required for RATED                  │
+│   - reason: enum [TOO_EXPENSIVE, TOO_FAR, TOO_CROWDED,                   │
+│     NOT_SUITABLE_FOR_KIDS, PREFER_QUIETER, FIND_SIMILAR] (nullable)     │
+│   - details: string (nullable)                                           │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Updated weights, insight, similar POIs (PreferenceFeedbackResponse)│
+│   400 - Validation error (ApiError)                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/preferences/{sessionId}/enrich                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Preferences                                                          │
+│ Summary: Launch Wikipedia enrichment prioritized by session's weights     │
+│ Operation ID: enrichForSession                                             │
+│                                                                             │
+│ Parameters (path):                                                         │
+│   - sessionId: string [REQUIRED]                                          │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Enrichment job launched (JobLaunchResponse)                       │
+│   503 - Enrichment disabled (JobLaunchResponse)                           │
+│   500 - Failed to launch (JobLaunchResponse)                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------- PROFILE ENDPOINTS ---------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/profile                                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Profile                                                              │
+│ Summary: Upsert the traveler's baseline profile                           │
+│ Operation ID: upsertProfile                                                │
+│                                                                             │
+│ Request Body (application/json):                                           │
+│   TravelerProfileRequest:                                                  │
+│   - sessionId: string [REQUIRED]                                          │
+│   - travelerCount: int32 (nullable)                                      │
+│   - childrenCount: int32 (nullable)                                      │
+│   - interests: array of Interest                                         │
+│   - groupType: GroupType enum                                            │
+│   - ageRange: AgeRange enum                                              │
+│   - mobility: MobilityLimitation enum                                    │
+│   - pace: Pace enum                                                      │
+│   - budget: Budget enum                                                  │
+│   - walking: WalkingLevel enum                                           │
+│   - food: FoodPreference enum                                            │
+│   - diet: Diet enum                                                      │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Stored profile (TravelerProfileResponse)                          │
+│   400 - Validation error (ApiError)                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GET /api/profile/{sessionId}                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Profile                                                              │
+│ Summary: Retrieve the traveler's profile for a session                    │
+│ Operation ID: getProfile                                                   │
+│                                                                             │
+│ Parameters (path):                                                         │
+│   - sessionId: string [REQUIRED]                                          │
+│                                                                             │
+│ Responses:                                                                 │
+│   200 - Stored profile (TravelerProfileResponse)                          │
+│   404 - No profile found                                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------- IMPORTS ENDPOINTS ---------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/wikidata/import                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Imports                                                              │
+│ Summary: Manually trigger the Wikidata POI import job                     │
+│ Description: Only available when wikidata.import.enabled=true.            │
+│ Operation ID: triggerWikidataImport                                        │
+│                                                                             │
+│ Parameters (query):                                                        │
+│   - reset: boolean (default: false)                                      │
+│                                                                             │
+│ Responses:                                                                 │
+│   202 - Import job started (ImportJobResponse)                            │
+│   500 - Failed to launch (ImportJobResponse)                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/overpass/import                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tags: Imports                                                              │
+│ Summary: Manually trigger the Overpass POI import job                     │
+│ Description: Only available when overpass.import.enabled=true.            │
+│ Operation ID: triggerOverpassImport                                        │
+│                                                                             │
+│ Responses:                                                                 │
+│   202 - Import job started (ImportJobResponse)                            │
+│   500 - Failed to launch (ImportJobResponse)                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                               DATA SCHEMAS
+================================================================================
+
+AUTH SCHEMAS
+------------
+
+SignupRequest:
+  - email: string (email format) [REQUIRED]
+  - password: string (min 6, max 72) [REQUIRED]
+  - fullName: string (max 200)
+
+LoginRequest:
+  - email: string (email format) [REQUIRED]
+  - password: string [REQUIRED]
+
+ResendVerificationRequest:
+  - email: string (email format) [REQUIRED]
+
+UserResponse:
+  - id: string (UUID)
+  - email: string
+  - fullName: string (nullable)
+  - emailVerified: boolean
+  - authProvider: enum [LOCAL, GOOGLE]
+  - createdAt: date-time
+
+SignupResponse:
+  - user: UserResponse
+  - emailSent: boolean
+  - message: string
+
+VerifyEmailResponse:
+  - verified: boolean
+  - user: UserResponse
+
+AuthResponse:
+  - token: string
+  - tokenType: string (example: Bearer)
+  - user: UserResponse
+
+AuthProvider: enum [LOCAL, GOOGLE]
+
+ApiError:
+  - status: int32
+  - code: string (example: VALIDATION_ERROR)
+  - message: string
+
+POI SCHEMAS
+-----------
+
+PoiResponse:
+  - id: string (UUID)
+  - osmId: int64
+  - osmType: string (nullable)
+  - nameTr: string (nullable)
+  - nameEn: string (nullable)
+  - category: string (nullable)
+  - subcategory: string (nullable)
+  - lat: double
+  - lon: double
+  - completenessScore: int32
+  - distanceKm: double (nullable) - Present only in /nearby results
+  - attributes: object (nullable)
+
+FeedbackType: enum [CLOSED, INACCURATE, MOVED, DUPLICATE, OTHER]
+
+FeedbackRequest:
+  - poiId: string (UUID) [REQUIRED]
+  - type: FeedbackType [REQUIRED]
+  - details: string (nullable)
+  - sessionId: string (nullable)
+  - newLat: double (nullable) - Only for MOVED
+  - newLon: double (nullable) - Only for MOVED
+
+FeedbackResponse:
+  - accepted: boolean
+  - message: string
+  - alternativePoi: PoiResponse (nullable)
+
+WEATHER SCHEMAS
+---------------
+
+WeatherResponse:
+  - location: WeatherLocation
+  - current: CurrentConditions
+  - daily: array of DailyForecast
+
+WeatherLocation:
+  - latitude: double
+  - longitude: double
+  - timezone: string
+
+CurrentConditions:
+  - temperature: double
+  - feelsLike: double
+  - humidity: int32
+  - windSpeed: double
+  - windDirection: int32
+  - weatherCode: int32
+  - description: string
+
+DailyForecast:
+  - date: date
+  - maxTemp: double
+  - minTemp: double
+  - precipitation: double
+  - maxWindSpeed: double
+  - weatherCode: int32
+  - description: string
+
+ROUTING SCHEMAS
+---------------
+
+RouteResponse:
+  - distanceKm: double
+  - durationMinutes: double
+  - profile: enum [driving, foot, bike]
+  - summary: string
+  - geometry: object (GeoJSON LineString)
+
+TRIP PLANNER SCHEMAS
+--------------------
+
+TripPlanRequest:
+  - basics: TripBasics [REQUIRED]
+  - profile: TripTravelerProfile [REQUIRED]
+  - interests: TripInterests [REQUIRED]
+  - style: TripTravelStyle [REQUIRED]
+  - sessionId: string (nullable)
+
+TripBasics:
+  - destination: string [REQUIRED]
+  - startDate: date [REQUIRED]
+  - endDate: date [REQUIRED]
+  - travelerCount: int32 (min: 1) [REQUIRED]
+  - childrenCount: int32 (min: 0, nullable)
+  - accommodationLocation: string [REQUIRED]
+  - arrivalTime: string (nullable, free-form)
+  - departureTime: string (nullable, free-form)
+  - transportMode: TransportMode [REQUIRED]
+
+TripTravelerProfile:
+  - ageRange: AgeRange [REQUIRED]
+  - groupType: GroupType [REQUIRED]
+  - childAgeRanges: array of AgeRange
+  - mobilityLimitation: MobilityLimitation
+  - diet: Diet
+
+TripInterests:
+  - selectedInterests: array of Interest [REQUIRED]
+  - additionalNotes: string (nullable)
+
+TripTravelStyle:
+  - pace: Pace [REQUIRED]
+  - walking: WalkingLevel [REQUIRED]
+  - budget: Budget [REQUIRED]
+  - food: FoodPreference [REQUIRED]
+  - planningStyle: PlanningStyle [REQUIRED]
+
+TripPlanResponse:
+  - tripDays: int32
+  - summary: string
+  - suggestions: array of ScoredPoi
+  - dayPlan: array of DayPlan
+  - notes: array of string
+  - weatherSummary: string
+  - preferenceInsight: string (nullable)
+  - narrative: string (nullable)
+
+ScoredPoi:
+  - poi: PoiResponse
+  - score: double (0-100)
+  - factors: object (additionalProperties: double)
+  - reasons: array of string
+  - travelMinutes: int32 (nullable)
+  - visitMinutes: int32 (nullable)
+  - startTime: string (nullable, example: "10:00")
+  - endTime: string (nullable, example: "11:30")
+  - openAtScheduledTime: boolean (nullable)
+
+DayPlan:
+  - day: int32
+  - date: date
+  - weather: string (nullable)
+  - items: array of ScoredPoi
+  - notes: array of string
+  - narrative: string (nullable)
+  - lunch: LunchSlot (nullable)
+
+LunchSlot:
+  - prompt: string
+  - needsDietInfo: boolean
+  - nearbyRestaurants: array of ScoredPoi
+  - returnToHotel: ReturnToHotel
+  - note: string (nullable)
+
+ReturnToHotel:
+  - travelMinutes: int32
+  - distanceKm: double
+
+TransportMode: enum [DRIVING, FOOT, BIKE, TRANSIT, TAXI]
+AgeRange: enum [UNDER_18, AGE_18_24, AGE_25_34, AGE_35_44, AGE_45_54, AGE_55_64, AGE_65_PLUS, MIXED]
+GroupType: enum [SOLO, COUPLE, FAMILY, FRIENDS]
+MobilityLimitation: enum [NONE, LIMITED_WALKING, WHEELCHAIR, STROLLER]
+Interest: enum [HISTORY, MUSEUMS, NATURE, BEACHES, FOOD, SHOPPING, NIGHTLIFE, PHOTOGRAPHY, ARCHITECTURE, ADVENTURE, LOCAL_CULTURE, LUXURY, HIDDEN_GEMS, FAMILY_ACTIVITIES]
+Pace: enum [RELAXED, BALANCED, PACKED]
+WalkingLevel: enum [MINIMAL, MODERATE, LOTS]
+Budget: enum [BUDGET, MID_RANGE, PREMIUM, LUXURY]
+FoodPreference: enum [LOCAL, FINE_DINING, STREET_FOOD, VEGETARIAN, VEGAN, NO_PREFERENCE]
+Diet: enum [NONE, VEGETARIAN, VEGAN, HALAL, GLUTEN_FREE, LACTOSE_FREE]
+PlanningStyle: enum [DETAILED_SCHEDULE, RECOMMENDATIONS_ONLY, SURPRISE_ME]
+
+PREFERENCES SCHEMAS
+-------------------
+
+PreferenceReaction: enum [LIKE, DISLIKE, LOVE, NOT_INTERESTED, RATED]
+FeedbackReason: enum [TOO_EXPENSIVE, TOO_FAR, TOO_CROWDED, NOT_SUITABLE_FOR_KIDS, PREFER_QUIETER, FIND_SIMILAR]
+
+PreferenceFeedbackRequest:
+  - poiId: string (UUID) [REQUIRED]
+  - sessionId: string [REQUIRED]
+  - reaction: PreferenceReaction [REQUIRED]
+  - rating: int32 (1-5, nullable) - Required for RATED
+  - reason: FeedbackReason (nullable)
+  - details: string (nullable)
+
+PreferenceFeedbackResponse:
+  - accepted: boolean
+  - message: string
+  - updatedWeights: object (additionalProperties: double)
+  - insight: string (nullable)
+  - similarPois: array of PoiResponse (when reason=FIND_SIMILAR)
+
+PreferenceWeights:
+  - additionalProperties: double (0-1)
+
+JobLaunchResponse:
+  - accepted: boolean
+  - status: string
+  - message: string
+
+PROFILE SCHEMAS
+---------------
+
+TravelerProfileRequest:
+  - sessionId: string [REQUIRED]
+  - travelerCount: int32 (nullable)
+  - childrenCount: int32 (nullable)
+  - interests: array of Interest
+  - groupType: GroupType
+  - ageRange: AgeRange
+  - mobility: MobilityLimitation
+  - pace: Pace
+  - budget: Budget
+  - walking: WalkingLevel
+  - food: FoodPreference
+  - diet: Diet
+
+TravelerProfileResponse:
+  - sessionId: string
+  - travelerCount: int32 (nullable)
+  - childrenCount: int32 (nullable)
+  - interests: array of Interest
+  - groupType: GroupType
+  - ageRange: AgeRange
+  - mobility: MobilityLimitation
+  - pace: Pace
+  - budget: Budget
+  - walking: WalkingLevel
+  - food: FoodPreference
+  - diet: Diet
+  - updatedAt: date-time
+
+IMPORTS SCHEMAS
+---------------
+
+ImportJobResponse:
+  - status: string (example: STARTED)
+  - message: string
+  - resetFromStart: boolean (nullable) - Only on Wikidata import
+
+================================================================================
+                          SECURITY SCHEMES
+================================================================================
+
+bearerAuth:
+  Type: HTTP
+  Scheme: bearer
+  Bearer Format: JWT
+  Description: JWT returned by POST /api/auth/login or the Google callback.
+
+================================================================================
+                              END OF FILE
+================================================================================

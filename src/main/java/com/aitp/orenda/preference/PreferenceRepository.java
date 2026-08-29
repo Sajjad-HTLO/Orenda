@@ -27,6 +27,13 @@ public class PreferenceRepository {
 
     private static final double DEFAULT_WEIGHT = 0.5;
 
+    /**
+     * How long a learned trip constraint (budget cap, radius cap, flags) stays
+     * in effect without being refreshed by new feedback. After this window the
+     * constraint stops applying.
+     */
+    private static final int CONSTRAINT_TTL_DAYS = 30;
+
     private final JdbcTemplate jdbc;
 
     // ── Profile ─────────────────────────────────────────────────────────────
@@ -203,8 +210,9 @@ public class PreferenceRepository {
             return Collections.emptyMap();
         }
         return jdbc.query("""
-                        SELECT constraint_key, value FROM preference_constraint WHERE session_id = ?
-                        """,
+                        SELECT constraint_key, value FROM preference_constraint
+                        WHERE session_id = ? AND last_seen > NOW() - INTERVAL '%d days'
+                        """.formatted(CONSTRAINT_TTL_DAYS),
                 rs -> {
                     Map<String, String> out = new LinkedHashMap<>();
                     while (rs.next()) {
@@ -220,8 +228,10 @@ public class PreferenceRepository {
             return null;
         }
         return jdbc.query("""
-                        SELECT value FROM preference_constraint WHERE session_id = ? AND constraint_key = ?
-                        """,
+                        SELECT value FROM preference_constraint
+                        WHERE session_id = ? AND constraint_key = ?
+                          AND last_seen > NOW() - INTERVAL '%d days'
+                        """.formatted(CONSTRAINT_TTL_DAYS),
                 rs -> rs.next() ? rs.getString(1) : null,
                 sessionId, constraintKey);
     }

@@ -25,7 +25,7 @@ public record TripWeather(List<WeatherResponse.DailyForecast> days) {
             return false;
         }
         WeatherResponse.DailyForecast d = day.get();
-        return d.precipitation() >= 2.0 || isRainCode(d.weatherCode());
+        return d.precipitation() >= 2.0 || isRainCode(d.weatherCode()) || isSnowCode(d.weatherCode());
     }
 
     public boolean isOutdoorGood(String date) {
@@ -57,6 +57,15 @@ public record TripWeather(List<WeatherResponse.DailyForecast> days) {
         return (code >= 51 && code <= 67)
                 || (code >= 80 && code <= 82)
                 || code == 95 || code == 96 || code == 99;
+    }
+
+    /**
+     * Snow codes (71–77, 85–86) are treated like rain for planning purposes:
+     * a snowy day should lean indoors and avoid open-roof venues just like a
+     * rainy one.
+     */
+    private static boolean isSnowCode(int code) {
+        return (code >= 71 && code <= 77) || code == 85 || code == 86;
     }
 
     /**

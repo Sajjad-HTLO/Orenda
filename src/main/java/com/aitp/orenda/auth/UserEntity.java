@@ -22,4 +22,7 @@ public class UserEntity {
     private Instant lastLoginAt;
     private Instant createdAt;
     private Instant updatedAt;
+    private String avatarUrl;
+    private String homeCity;
+    private String[] dietaryRestrictions;
 }
