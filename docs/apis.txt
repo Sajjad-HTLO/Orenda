@@ -1,20 +1,2051 @@
-================================================================================
-                           ORENDA API SPECIFICATION
-================================================================================
 
-API Title: Orenda API
-Description: Turkey-focused "Travel Operating System" — Spring Boot backend.
-             POI discovery/search, weather, routing, trip planning, user 
-             preferences, profile onboarding, and data-import triggers.
-Version: 0.0.1-SNAPSHOT
-Contact: Orenda
+openapi: 3.0.3
+info:
+  title: Orenda API
+  description: |
+    Turkey-focused "Travel Operating System" — Spring Boot backend.
+    POI discovery/search, weather, routing, trip planning, user preferences,
+    profile onboarding, and data-import triggers.
+  version: 0.0.1-SNAPSHOT
+  contact:
+    name: Orenda
+servers:
+  - url: https://orenda-d9qj.onrender.com
+    description: Local development
+tags:
+  - name: Auth
+    description: User management, JWT, email verification, Google OAuth
+  - name: POI
+    description: Point-of-interest discovery, search, categories, feedback
+  - name: Weather
+    description: Current conditions + daily forecast (Open-Meteo)
+  - name: Routing
+    description: Point-to-point routing (OSRM)
+  - name: Trip Planner
+    description: Ranked POI suggestions and day-by-day trip plans
+  - name: Saved Trips
+    description: Authenticated user's saved trips, updates, export and recalculation
+  - name: Reviews
+    description: Traveler reviews and ratings for POIs
+  - name: User Profile
+    description: Authenticated user's personal details
+  - name: Preferences
+    description: Learned per-category preference weights and feedback
+  - name: Profile
+    description: Long-term traveler onboarding profile
+  - name: Imports
+    description: Manually trigger background data-import jobs
 
-================================================================================
-                                SERVERS
-================================================================================
+security:
+  - {}
 
-1. Deployed server url 
-   URL: https://orenda-d9qj.onrender.com
+paths:
+  /api/auth/signup:
+    post:
+      tags: [Auth]
+      summary: Create an account and email a verification link
+      operationId: signup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignupResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/auth/verify-email:
+    get:
+      tags: [Auth]
+      summary: Confirm an email address with a verification token
+      operationId: verifyEmail
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: One-time email verification token
+      responses:
+        '200':
+          description: Email verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyEmailResponse'
+        '400':
+          description: Invalid verification token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange credentials for a JWT
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Email not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Re-send the verification email
+      operationId: resendVerification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerificationRequest'
+      responses:
+        '200':
+          description: Message sent (if the address has an account)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Verification email sent if the address has an account.
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/auth/google:
+    get:
+      tags: [Auth]
+      summary: Redirect the browser to Google's account page
+      operationId: googleRedirect
+      responses:
+        '302':
+          description: Redirect to Google OAuth consent screen
+        '503':
+          description: OAuth not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/auth/google/callback:
+    get:
+      tags: [Auth]
+      summary: Google OAuth callback; redirects browser to frontend with a JWT
+      operationId: googleCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the configured frontend with `?token=<jwt>` (or `?error=...` on failure)
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current authenticated user
+      operationId: me
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Authenticated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Authentication required
+
+  /api/users/profile:
+    get:
+      tags: [User Profile]
+      summary: Current authenticated user's personal profile
+      operationId: getUserProfile
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Authentication required
+    put:
+      tags: [User Profile]
+      summary: Update user personal details (display name, avatar, dietary restrictions, home city)
+      operationId: updateUserProfile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Authentication required
+
+  /api/pois/nearby:
+    get:
+      tags: [POI]
+      summary: POIs within a radius, optionally filtered by category
+      operationId: nearbyPois
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 41.01
+        - name: lon
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 28.97
+        - name: radiusKm
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+            default: 10
+            maximum: 50
+          description: Search radius in km (capped at 50)
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional category filter
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            default: 0
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Nearby POIs, nearest first, with distanceKm set
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PoiResponse'
+
+  /api/pois/search:
+    get:
+      tags: [POI]
+      summary: Full-text search over Turkish and English POI names
+      operationId: searchPois
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          example: topkapi
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            default: 0
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Matching POIs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PoiResponse'
+
+  /api/pois/categories:
+    get:
+      tags: [POI]
+      summary: All categories and subcategories with POI counts
+      operationId: listCategories
+      responses:
+        '200':
+          description: Category/subcategory rows with counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    category:
+                      type: string
+                      nullable: true
+                    subcategory:
+                      type: string
+                      nullable: true
+                    count:
+                      type: integer
+                      format: int64
+
+  /api/pois/{id}:
+    get:
+      tags: [POI]
+      summary: Single POI by UUID
+      operationId: getPoiById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The POI
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoiResponse'
+        '404':
+          description: POI not found
+
+  /api/pois/{id}/reviews:
+    get:
+      tags: [Reviews]
+      summary: Retrieve traveler reviews for a POI
+      operationId: listPoiReviews
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reviews, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PoiReviewResponse'
+    post:
+      tags: [Reviews]
+      summary: Submit a new review/rating for a POI
+      operationId: submitPoiReview
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PoiReviewRequest'
+      responses:
+        '201':
+          description: Review created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoiReviewResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: POI not found
+
+  /api/pois/feedback:
+    post:
+      tags: [POI]
+      summary: Report feedback for a POI and get the nearest alternative
+      operationId: submitPoiFeedback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackRequest'
+      responses:
+        '200':
+          description: Feedback accepted; alternative POI when one exists nearby
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: POI not found
+
+  /api/weather:
+    get:
+      tags: [Weather]
+      summary: Current conditions and daily forecast for a coordinate
+      description: Powered by Open-Meteo (free, no API key required). Days is clamped to 1–16.
+      operationId: getWeather
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 41.01
+        - name: lon
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 28.97
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            default: 7
+            minimum: 1
+            maximum: 16
+      responses:
+        '200':
+          description: Weather data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeatherResponse'
+
+  /api/route:
+    get:
+      tags: [Routing]
+      summary: Point-to-point route between two coordinates
+      description: Powered by OSRM public demo server (free, no API key required).
+      operationId: getRoute
+      parameters:
+        - name: fromLat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 41.01
+        - name: fromLon
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 28.97
+        - name: toLat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 36.89
+        - name: toLon
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          example: 30.71
+        - name: profile
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [driving, foot, bike]
+            default: driving
+      responses:
+        '200':
+          description: Route with GeoJSON geometry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteResponse'
+
+  /api/trips/plan:
+    post:
+      tags: [Trip Planner]
+      summary: Generate a ranked trip plan from the questionnaire
+      operationId: planTrip
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TripPlanRequest'
+      responses:
+        '200':
+          description: Ranked suggestions plus optional day-by-day plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripPlanResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/trips:
+    get:
+      tags: [Saved Trips]
+      summary: List the authenticated user's saved trips
+      operationId: listSavedTrips
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Saved trips (no day detail)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SavedTripSummaryResponse'
+        '401':
+          description: Authentication required
+    post:
+      tags: [Saved Trips]
+      summary: Save a freshly generated plan
+      operationId: saveTrip
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveTripRequest'
+      responses:
+        '201':
+          description: Trip saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedTripDetailResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Authentication required
+
+  /api/trips/{id}:
+    get:
+      tags: [Saved Trips]
+      summary: Retrieve a saved trip with full day itineraries and stops
+      operationId: getSavedTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Full trip detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedTripDetailResponse'
+        '401':
+          description: Authentication required
+        '404':
+          description: Trip not found
+    put:
+      tags: [Saved Trips]
+      summary: Update stops, reorder stops, or adjust notes
+      operationId: updateSavedTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTripRequest'
+      responses:
+        '200':
+          description: Updated trip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedTripDetailResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Trip not found
+    patch:
+      tags: [Saved Trips]
+      summary: Update stops, reorder stops, or adjust notes (alias of PUT)
+      operationId: patchSavedTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTripRequest'
+      responses:
+        '200':
+          description: Updated trip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedTripDetailResponse'
+        '404':
+          description: Trip not found
+    delete:
+      tags: [Saved Trips]
+      summary: Delete or archive a saved trip
+      operationId: deleteSavedTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: archive
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Archive (soft delete) instead of hard delete
+      responses:
+        '204':
+          description: Deleted or archived
+        '401':
+          description: Authentication required
+
+  /api/trips/{id}/export:
+    get:
+      tags: [Saved Trips]
+      summary: Export trip itinerary to PDF or iCal (.ics)
+      operationId: exportSavedTrip
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ics, pdf]
+            default: ics
+      responses:
+        '200':
+          description: File download
+          content:
+            text/calendar:
+              schema:
+                type: string
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Unknown export format
+        '404':
+          description: Trip not found
+
+  /api/trips/recalculate:
+    post:
+      tags: [Saved Trips]
+      summary: Dynamically recalculate remaining stops given a real-time event
+      description: Supports RAIN (indoor stops first), DELAY (shift times) and ROAD_CLOSURE (drop unreachable stop). Persists the recalculation and returns the updated trip.
+      operationId: recalculateTrip
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecalculateTripRequest'
+      responses:
+        '200':
+          description: Updated trip after recalculation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedTripDetailResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Trip or stop not found
+
+  /api/preferences/{sessionId}:
+    get:
+      tags: [Preferences]
+      summary: Current learned per-category weights for a session
+      operationId: getPreferenceWeights
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "Category weights (0..1), e.g. CULTURE: 0.91"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenceWeights'
+
+  /api/preferences/feedback:
+    post:
+      tags: [Preferences]
+      summary: Submit like/dislike/love/not-interested/rated feedback for a POI
+      operationId: submitPreferenceFeedback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreferenceFeedbackRequest'
+      responses:
+        '200':
+          description: Updated weights, insight, and similar POIs (when requested)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenceFeedbackResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/preferences/{sessionId}/enrich:
+    post:
+      tags: [Preferences]
+      summary: Launch Wikipedia enrichment prioritized by the session's learned weights
+      operationId: enrichForSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Enrichment job launched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobLaunchResponse'
+        '503':
+          description: Enrichment disabled (wikipedia.enrichment.enabled=false)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobLaunchResponse'
+        '500':
+          description: Failed to launch the enrichment job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobLaunchResponse'
+
+  /api/profile:
+    post:
+      tags: [Profile]
+      summary: Upsert the traveler's baseline profile
+      operationId: upsertProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TravelerProfileRequest'
+      responses:
+        '200':
+          description: The stored profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TravelerProfileResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/profile/{sessionId}:
+    get:
+      tags: [Profile]
+      summary: Retrieve the traveler's profile for a session
+      operationId: getProfile
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The stored profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TravelerProfileResponse'
+        '404':
+          description: No profile found for this session
+
+  /api/wikidata/import:
+    post:
+      tags: [Imports]
+      summary: Manually trigger the Wikidata POI import job
+      description: Only available when `wikidata.import.enabled=true`.
+      operationId: triggerWikidataImport
+      parameters:
+        - name: reset
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '202':
+          description: Import job started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJobResponse'
+        '500':
+          description: Failed to launch the import job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJobResponse'
+
+  /api/overpass/import:
+    post:
+      tags: [Imports]
+      summary: Manually trigger the Overpass POI import job
+      description: Only available when `overpass.import.enabled=true`.
+      operationId: triggerOverpassImport
+      responses:
+        '202':
+          description: Import job started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJobResponse'
+        '500':
+          description: Failed to launch the import job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJobResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT returned by POST /api/auth/login or the Google callback.
+
+  schemas:
+    # ── Auth ──────────────────────────────────────────────────────────────
+    SignupRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 6
+          maxLength: 72
+        fullName:
+          type: string
+          maxLength: 200
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+    ResendVerificationRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        fullName:
+          type: string
+          nullable: true
+        emailVerified:
+          type: boolean
+        authProvider:
+          $ref: '#/components/schemas/AuthProvider'
+        createdAt:
+          type: string
+          format: date-time
+    SignupResponse:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/UserResponse'
+        emailSent:
+          type: boolean
+        message:
+          type: string
+    VerifyEmailResponse:
+      type: object
+      properties:
+        verified:
+          type: boolean
+        user:
+          $ref: '#/components/schemas/UserResponse'
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        tokenType:
+          type: string
+          example: Bearer
+        user:
+          $ref: '#/components/schemas/UserResponse'
+    AuthProvider:
+      type: string
+      enum: [LOCAL, GOOGLE]
+    ApiError:
+      type: object
+      properties:
+        status:
+          type: integer
+          format: int32
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+
+    # ── POI ───────────────────────────────────────────────────────────────
+    PoiResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        osmId:
+          type: integer
+          format: int64
+        osmType:
+          type: string
+          nullable: true
+        nameTr:
+          type: string
+          nullable: true
+        nameEn:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        subcategory:
+          type: string
+          nullable: true
+        lat:
+          type: number
+          format: double
+        lon:
+          type: number
+          format: double
+        completenessScore:
+          type: integer
+          format: int32
+        distanceKm:
+          type: number
+          format: double
+          nullable: true
+          description: Present only in /nearby results
+        attributes:
+          type: object
+          additionalProperties: true
+          nullable: true
+    FeedbackType:
+      type: string
+      enum: [CLOSED, INACCURATE, MOVED, DUPLICATE, OTHER]
+    FeedbackRequest:
+      type: object
+      required: [poiId, type]
+      properties:
+        poiId:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/FeedbackType'
+        details:
+          type: string
+          nullable: true
+        sessionId:
+          type: string
+          nullable: true
+        newLat:
+          type: number
+          format: double
+          nullable: true
+          description: Only relevant when type = MOVED
+        newLon:
+          type: number
+          format: double
+          nullable: true
+          description: Only relevant when type = MOVED
+    FeedbackResponse:
+      type: object
+      properties:
+        accepted:
+          type: boolean
+        message:
+          type: string
+        alternativePoi:
+          $ref: '#/components/schemas/PoiResponse'
+          nullable: true
+
+    # ── Weather ───────────────────────────────────────────────────────────
+    WeatherResponse:
+      type: object
+      properties:
+        location:
+          $ref: '#/components/schemas/WeatherLocation'
+        current:
+          $ref: '#/components/schemas/CurrentConditions'
+        daily:
+          type: array
+          items:
+            $ref: '#/components/schemas/DailyForecast'
+    WeatherLocation:
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        timezone:
+          type: string
+    CurrentConditions:
+      type: object
+      properties:
+        temperature:
+          type: number
+          format: double
+        feelsLike:
+          type: number
+          format: double
+        humidity:
+          type: integer
+          format: int32
+        windSpeed:
+          type: number
+          format: double
+        windDirection:
+          type: integer
+          format: int32
+        weatherCode:
+          type: integer
+          format: int32
+        description:
+          type: string
+    DailyForecast:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        maxTemp:
+          type: number
+          format: double
+        minTemp:
+          type: number
+          format: double
+        precipitation:
+          type: number
+          format: double
+        maxWindSpeed:
+          type: number
+          format: double
+        weatherCode:
+          type: integer
+          format: int32
+        description:
+          type: string
+
+    # ── Routing ───────────────────────────────────────────────────────────
+    RouteResponse:
+      type: object
+      properties:
+        distanceKm:
+          type: number
+          format: double
+        durationMinutes:
+          type: number
+          format: double
+        profile:
+          type: string
+          enum: [driving, foot, bike]
+        summary:
+          type: string
+        geometry:
+          type: object
+          additionalProperties: true
+          description: GeoJSON LineString geometry
+
+    # ── Trip planner ──────────────────────────────────────────────────────
+    TripPlanRequest:
+      type: object
+      required: [basics, profile, interests, style]
+      properties:
+        basics:
+          $ref: '#/components/schemas/TripBasics'
+        profile:
+          $ref: '#/components/schemas/TripTravelerProfile'
+        interests:
+          $ref: '#/components/schemas/TripInterests'
+        style:
+          $ref: '#/components/schemas/TripTravelStyle'
+        sessionId:
+          type: string
+          nullable: true
+          description: Anonymous traveler identifier; blends in long-term profile when present
+    TripBasics:
+      type: object
+      required: [destination, startDate, endDate, travelerCount, accommodationLocation, transportMode]
+      properties:
+        destination:
+          type: string
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        travelerCount:
+          type: integer
+          format: int32
+          minimum: 1
+        childrenCount:
+          type: integer
+          format: int32
+          minimum: 0
+          nullable: true
+        accommodationLocation:
+          type: string
+        arrivalTime:
+          type: string
+          nullable: true
+          description: Free-form, e.g. "14:30"
+        departureTime:
+          type: string
+          nullable: true
+          description: Free-form, e.g. "11:00"
+        transportMode:
+          $ref: '#/components/schemas/TransportMode'
+    TripTravelerProfile:
+      type: object
+      required: [ageRange, groupType]
+      properties:
+        ageRange:
+          $ref: '#/components/schemas/AgeRange'
+        groupType:
+          $ref: '#/components/schemas/GroupType'
+        childAgeRanges:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgeRange'
+          description: Family only
+        mobilityLimitation:
+          $ref: '#/components/schemas/MobilityLimitation'
+        diet:
+          $ref: '#/components/schemas/Diet'
+    TripInterests:
+      type: object
+      required: [selectedInterests]
+      properties:
+        selectedInterests:
+          type: array
+          items:
+            $ref: '#/components/schemas/Interest'
+        additionalNotes:
+          type: string
+          nullable: true
+    TripTravelStyle:
+      type: object
+      required: [pace, walking, budget, food, planningStyle]
+      properties:
+        pace:
+          $ref: '#/components/schemas/Pace'
+        walking:
+          $ref: '#/components/schemas/WalkingLevel'
+        budget:
+          $ref: '#/components/schemas/Budget'
+        food:
+          $ref: '#/components/schemas/FoodPreference'
+        planningStyle:
+          $ref: '#/components/schemas/PlanningStyle'
+    TripPlanResponse:
+      type: object
+      properties:
+        tripDays:
+          type: integer
+          format: int32
+        summary:
+          type: string
+        suggestions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScoredPoi'
+        dayPlan:
+          type: array
+          items:
+            $ref: '#/components/schemas/DayPlan'
+        notes:
+          type: array
+          items:
+            type: string
+        weatherSummary:
+          type: string
+        preferenceInsight:
+          type: string
+          nullable: true
+        narrative:
+          type: string
+          nullable: true
+    ScoredPoi:
+      type: object
+      properties:
+        poi:
+          $ref: '#/components/schemas/PoiResponse'
+        score:
+          type: number
+          format: double
+          description: 0–100, higher is better
+        factors:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+        reasons:
+          type: array
+          items:
+            type: string
+        travelMinutes:
+          type: integer
+          format: int32
+          nullable: true
+          description: From previous stop / base to this POI
+        visitMinutes:
+          type: integer
+          format: int32
+          nullable: true
+        startTime:
+          type: string
+          nullable: true
+          example: "10:00"
+        endTime:
+          type: string
+          nullable: true
+          example: "11:30"
+        openAtScheduledTime:
+          type: boolean
+          nullable: true
+    DayPlan:
+      type: object
+      properties:
+        day:
+          type: integer
+          format: int32
+        date:
+          type: string
+          format: date
+        weather:
+          type: string
+          nullable: true
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScoredPoi'
+        notes:
+          type: array
+          items:
+            type: string
+        narrative:
+          type: string
+          nullable: true
+        lunch:
+          $ref: '#/components/schemas/LunchSlot'
+    LunchSlot:
+      type: object
+      properties:
+        prompt:
+          type: string
+        needsDietInfo:
+          type: boolean
+        nearbyRestaurants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScoredPoi'
+        returnToHotel:
+          $ref: '#/components/schemas/ReturnToHotel'
+        note:
+          type: string
+          nullable: true
+    ReturnToHotel:
+      type: object
+      properties:
+        travelMinutes:
+          type: integer
+          format: int32
+        distanceKm:
+          type: number
+          format: double
+    TransportMode:
+      type: string
+      enum: [DRIVING, FOOT, BIKE, TRANSIT, TAXI]
+    AgeRange:
+      type: string
+      enum: [UNDER_18, AGE_18_24, AGE_25_34, AGE_35_44, AGE_45_54, AGE_55_64, AGE_65_PLUS, MIXED]
+    GroupType:
+      type: string
+      enum: [SOLO, COUPLE, FAMILY, FRIENDS]
+    MobilityLimitation:
+      type: string
+      enum: [NONE, LIMITED_WALKING, WHEELCHAIR, STROLLER]
+    Interest:
+      type: string
+      enum: [HISTORY, MUSEUMS, NATURE, BEACHES, FOOD, SHOPPING, NIGHTLIFE, PHOTOGRAPHY, ARCHITECTURE, ADVENTURE, LOCAL_CULTURE, LUXURY, HIDDEN_GEMS, FAMILY_ACTIVITIES]
+    Pace:
+      type: string
+      enum: [RELAXED, BALANCED, PACKED]
+    WalkingLevel:
+      type: string
+      enum: [MINIMAL, MODERATE, LOTS]
+    Budget:
+      type: string
+      enum: [BUDGET, MID_RANGE, PREMIUM, LUXURY]
+    FoodPreference:
+      type: string
+      enum: [LOCAL, FINE_DINING, STREET_FOOD, VEGETARIAN, VEGAN, NO_PREFERENCE]
+    Diet:
+      type: string
+      enum: [NONE, VEGETARIAN, VEGAN, HALAL, GLUTEN_FREE, LACTOSE_FREE]
+    PlanningStyle:
+      type: string
+      enum: [DETAILED_SCHEDULE, RECOMMENDATIONS_ONLY, SURPRISE_ME]
+
+    # ── Preferences ───────────────────────────────────────────────────────
+    PreferenceReaction:
+      type: string
+      enum: [LIKE, DISLIKE, LOVE, NOT_INTERESTED, RATED]
+    FeedbackReason:
+      type: string
+      enum: [TOO_EXPENSIVE, TOO_FAR, TOO_CROWDED, NOT_SUITABLE_FOR_KIDS, PREFER_QUIETER, FIND_SIMILAR]
+    PreferenceFeedbackRequest:
+      type: object
+      required: [poiId, sessionId, reaction]
+      properties:
+        poiId:
+          type: string
+          format: uuid
+        sessionId:
+          type: string
+        reaction:
+          $ref: '#/components/schemas/PreferenceReaction'
+        rating:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 5
+          nullable: true
+          description: Required when reaction = RATED
+        reason:
+          $ref: '#/components/schemas/FeedbackReason'
+        details:
+          type: string
+          nullable: true
+    PreferenceFeedbackResponse:
+      type: object
+      properties:
+        accepted:
+          type: boolean
+        message:
+          type: string
+        updatedWeights:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+          description: Learned weights per category (0..1)
+        insight:
+          type: string
+          nullable: true
+        similarPois:
+          type: array
+          items:
+            $ref: '#/components/schemas/PoiResponse'
+          description: Present only when reason = FIND_SIMILAR
+    PreferenceWeights:
+      type: object
+      additionalProperties:
+        type: number
+        format: double
+      description: Current learned per-category weights (0..1)
+    JobLaunchResponse:
+      type: object
+      properties:
+        accepted:
+          type: boolean
+        status:
+          type: string
+        message:
+          type: string
+
+    # ── Profile ───────────────────────────────────────────────────────────
+    TravelerProfileRequest:
+      type: object
+      required: [sessionId]
+      properties:
+        sessionId:
+          type: string
+        travelerCount:
+          type: integer
+          format: int32
+          nullable: true
+        childrenCount:
+          type: integer
+          format: int32
+          nullable: true
+        interests:
+          type: array
+          items:
+            $ref: '#/components/schemas/Interest'
+        groupType:
+          $ref: '#/components/schemas/GroupType'
+        ageRange:
+          $ref: '#/components/schemas/AgeRange'
+        mobility:
+          $ref: '#/components/schemas/MobilityLimitation'
+        pace:
+          $ref: '#/components/schemas/Pace'
+        budget:
+          $ref: '#/components/schemas/Budget'
+        walking:
+          $ref: '#/components/schemas/WalkingLevel'
+        food:
+          $ref: '#/components/schemas/FoodPreference'
+        diet:
+          $ref: '#/components/schemas/Diet'
+    TravelerProfileResponse:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        travelerCount:
+          type: integer
+          format: int32
+          nullable: true
+        childrenCount:
+          type: integer
+          format: int32
+          nullable: true
+        interests:
+          type: array
+          items:
+            $ref: '#/components/schemas/Interest'
+        groupType:
+          $ref: '#/components/schemas/GroupType'
+        ageRange:
+          $ref: '#/components/schemas/AgeRange'
+        mobility:
+          $ref: '#/components/schemas/MobilityLimitation'
+        pace:
+          $ref: '#/components/schemas/Pace'
+        budget:
+          $ref: '#/components/schemas/Budget'
+        walking:
+          $ref: '#/components/schemas/WalkingLevel'
+        food:
+          $ref: '#/components/schemas/FoodPreference'
+        diet:
+          $ref: '#/components/schemas/Diet'
+        updatedAt:
+          type: string
+          format: date-time
+
+    # ── Imports ───────────────────────────────────────────────────────────
+    ImportJobResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: STARTED
+        message:
+          type: string
+        resetFromStart:
+          type: boolean
+          nullable: true
+          description: Present only on the Wikidata import endpoint
+
+    # ── User profile ───────────────────────────────────────────────────────
+    UpdateProfileRequest:
+      type: object
+      properties:
+        fullName:
+          type: string
+          maxLength: 200
+        avatarUrl:
+          type: string
+          maxLength: 500
+        homeCity:
+          type: string
+          maxLength: 200
+        dietaryRestrictions:
+          type: array
+          items:
+            type: string
+
+    # ── Reviews ────────────────────────────────────────────────────────────
+    PoiReviewRequest:
+      type: object
+      required: [rating]
+      properties:
+        rating:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 5
+        title:
+          type: string
+          maxLength: 200
+        comment:
+          type: string
+          maxLength: 4000
+    PoiReviewResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        poiId:
+          type: string
+          format: uuid
+        travelerName:
+          type: string
+          nullable: true
+        rating:
+          type: integer
+          format: int32
+        title:
+          type: string
+          nullable: true
+        comment:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    # ── Saved trips ────────────────────────────────────────────────────────
+    SaveTripRequest:
+      type: object
+      required: [plan]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+        destination:
+          type: string
+          maxLength: 200
+        plan:
+          $ref: '#/components/schemas/TripPlanResponse'
+    SavedTripSummaryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        destination:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        tripDays:
+          type: integer
+          format: int32
+        summary:
+          type: string
+          nullable: true
+        weatherSummary:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+    SavedTripDetailResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        destination:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        tripDays:
+          type: integer
+          format: int32
+        summary:
+          type: string
+          nullable: true
+        weatherSummary:
+          type: string
+          nullable: true
+        narrative:
+          type: string
+          nullable: true
+        preferenceInsight:
+          type: string
+          nullable: true
+        notes:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/SavedTripDayResponse'
+    SavedTripDayResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        day:
+          type: integer
+          format: int32
+        date:
+          type: string
+          format: date
+          nullable: true
+        weather:
+          type: string
+          nullable: true
+        narrative:
+          type: string
+          nullable: true
+        notes:
+          type: array
+          items:
+            type: string
+        stops:
+          type: array
+          items:
+            $ref: '#/components/schemas/SavedTripStopResponse'
+    SavedTripStopResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        poiId:
+          type: string
+          format: uuid
+          nullable: true
+        nameTr:
+          type: string
+          nullable: true
+        nameEn:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        subcategory:
+          type: string
+          nullable: true
+        lat:
+          type: number
+          format: double
+          nullable: true
+        lon:
+          type: number
+          format: double
+          nullable: true
+        score:
+          type: number
+          format: double
+          nullable: true
+        travelMinutes:
+          type: integer
+          format: int32
+          nullable: true
+        visitMinutes:
+          type: integer
+          format: int32
+          nullable: true
+        startTime:
+          type: string
+          nullable: true
+        endTime:
+          type: string
+          nullable: true
+        openAtScheduledTime:
+          type: boolean
+          nullable: true
+        reasons:
+          type: array
+          items:
+            type: string
+        factors:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+    UpdateTripRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+        destination:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+          nullable: true
+        endDate:
+          type: string
+          format: date
+          nullable: true
+        notes:
+          type: array
+          items:
+            type: string
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/UpdateTripDay'
+    UpdateTripDay:
+      type: object
+      properties:
+        day:
+          type: integer
+          format: int32
+        date:
+          type: string
+          format: date
+          nullable: true
+        weather:
+          type: string
+          nullable: true
+        narrative:
+          type: string
+          nullable: true
+        notes:
+          type: array
+          items:
+            type: string
+        stops:
+          type: array
+          items:
+            $ref: '#/components/schemas/UpdateTripStop'
+    UpdateTripStop:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Existing stop id (optional; the plan is replaced wholesale)
+        poiId:
+          type: string
+          format: uuid
+          nullable: true
+        nameTr:
+          type: string
+          nullable: true
+        nameEn:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        subcategory:
+          type: string
+          nullable: true
+        lat:
+          type: number
+          format: double
+          nullable: true
+        lon:
+          type: number
+          format: double
+          nullable: true
+        score:
+          type: number
+          format: double
+          nullable: true
+        travelMinutes:
+          type: integer
+          format: int32
+          nullable: true
+        visitMinutes:
+          type: integer
+          format: int32
+          nullable: true
+        startTime:
+          type: string
+          nullable: true
+        endTime:
+          type: string
+          nullable: true
+        openAtScheduledTime:
+          type: boolean
+          nullable: true
+        reasons:
+          type: array
+          items:
+            type: string
+        factors:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+    RecalculateTripRequest:
+      type: object
+      required: [tripId, event]
+      properties:
+        tripId:
+          type: string
+          format: uuid
+        event:
+          type: string
+          enum: [RAIN, DELAY, ROAD_CLOSURE]
+        eventDate:
+          type: string
+          format: date
+          nullable: true
+          description: Day from which the recalculation applies (null = whole trip)
+        delayMinutes:
+          type: integer
+          format: int32
+          minimum: 1
+          nullable: true
+          description: Required for DELAY
+        affectedStopId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Required for ROAD_CLOSURE
+        note:
+          type: string
+          nullable: true
+
 
 ================================================================================
                                  TAGS
