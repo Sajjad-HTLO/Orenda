@@ -1,0 +1,24 @@
+
+then start crawling these urls:
+
+https://www.tripadvisor.com/Attraction_Products-g293974-a_themes.29397400020-Istanbul.html
+
+https://www.tripadvisor.com/Attractions-g293974-Activities-c42-t224-Istanbul.html
+
+https://www.tripadvisor.com/Attraction_Products-g293974-t11963-zfg11865-Istanbul.html
+
+https://www.tripadvisor.com/Attraction_Products-g293974-t12054-zfg11868-Istanbul.html
+
+https://www.tripadvisor.com/Attractions-g293974-Activities-c61-t167-Istanbul.html
+
+https://www.tripadvisor.com/Attraction_Products-g293974-t11938-zfg11881-Istanbul.html
+
+https://www.tripadvisor.com/Attractions-g293974-Activities-c63-Istanbul.html
+
+https://www.tripadvisor.com/Attraction_Products-g293974-t12082-zfg11884-Istanbul.html
+
+https://www.tripadvisor.com/Attractions-g293974-Activities-c42-t183-Istanbul.html
+
+https://www.tripadvisor.com/Attractions-g293974-Activities-zft11292-Istanbul.html
+
+https://www.tripadvisor.com/Attractions-g293974-Activities-c61-Istanbul.html
