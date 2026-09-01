@@ -1,0 +1,15 @@
+
+Main steps
+
+investigate design of pwa version
+
+anti-ai design of the app - get designs of anti-ai (humanise)
+
+ask front-end engineers and designers to feedback
+
+check responsive-ness in multi devices (tablet-mobile-desktop)
+
+test performance of the app (front-end and backend , carefuly)
+
+feature/flag or make premium featur for gemini talk (it will be very expensive in prod)
+
