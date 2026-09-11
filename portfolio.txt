@@ -1,0 +1,32 @@
+## Orenda — AI Travel Operating System
+
+**Orenda** is a personalized AI travel platform designed to transform travel planning from a static itinerary into an adaptive, intelligent experience.
+
+Instead of simply generating a list of tourist attractions, Orenda builds day-by-day itineraries based on a traveler’s **preferences, budget, pace, walking tolerance, trip type, weather, opening hours, and real-world travel times**. The system continuously learns from user feedback and can dynamically adjust the plan as the traveler’s needs or circumstances change.
+
+### Key Capabilities
+
+* **Personalized AI itinerary generation** based on traveler profiles and trip-specific preferences
+* **Intelligent POI discovery** powered by a rich geographic database built from OpenStreetMap and enriched with external knowledge sources
+* **Spatial search and optimization** using PostgreSQL/PostGIS
+* **Weather-aware planning** that adapts outdoor and indoor activities to forecast conditions
+* **Route and travel-time optimization** for realistic, geographically efficient itineraries
+* **Explainable recommendations** that tell travelers why each activity was selected
+* **Persistent traveler profiles** that remember preferences across trips
+* **Preference learning** from likes, dislikes, ratings, and behavioral feedback
+* **Constraint-based personalization**, allowing feedback such as "too expensive," "too far," or "too crowded" to directly influence future recommendations
+* **Immediate itinerary modification and re-planning**
+* **Self-healing POI data**, where traveler feedback can identify closed, inaccurate, moved, or duplicate places
+* **Future live-trip assistance**, allowing Orenda to continuously adapt plans based on location, time, weather, completed activities, and changing circumstances
+
+### Technology
+
+**Java 21 · Spring Boot · Spring Batch · PostgreSQL · PostGIS · Spring JDBC · Flyway · REST APIs · OpenStreetMap · Open-Meteo · OSRM · AI/LLM integration**
+
+The initial implementation focuses on **Turkey**, with the architecture designed for eventual global expansion.
+
+### The Vision
+
+Orenda is designed to evolve from an **AI itinerary planner** into an **AI travel companion** — one that learns how each traveler travels, understands the destination, continuously adapts to real-world conditions, and eventually connects planning with travel bookings and experiences.
+
+**Discover → Plan → Adapt → Travel → Learn**

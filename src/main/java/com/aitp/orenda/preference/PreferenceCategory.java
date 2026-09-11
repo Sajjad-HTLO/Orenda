@@ -23,6 +23,7 @@ public enum PreferenceCategory {
             case "entertainment" -> NIGHTLIFE;
             case "nature" -> NATURE;
             case "leisure" -> LEISURE;
+            case "activity" -> LEISURE;
             case "wellness" -> WELLNESS;
             case "attraction" -> ATTRACTION;
             case "accommodation" -> ACCOMMODATION;
