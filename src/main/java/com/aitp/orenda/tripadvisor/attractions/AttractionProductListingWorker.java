@@ -20,16 +20,21 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Stage 1 worker for the attraction products crawler: opens the Tripadvisor
- * {@code Attraction_Products} listing URL, waits out any DataDome challenge,
- * then repeatedly clicks the "See More" button until the full lazy-loaded list
- * is rendered (~110 dinner cruise products), extracts the rendered HTML and
- * hands it to {@link AttractionProductListingParser}.
+ * Stage 1 worker for the attraction products crawler: opens a Tripadvisor
+ * attraction listing URL, waits out any DataDome challenge, then collects the
+ * rendered product cards by scrolling and clicking the "See More" button when
+ * present. The extracted HTML is handed to {@link AttractionProductListingParser}.
  * <p>
- * Unlike hotels/restaurants this listing page has no {@code oa} pagination —
- * all items live on one page and are revealed by clicking "See More".
+ * Some listing pages (e.g. {@code Attraction_Products} tours) reveal the full
+ * list by clicking "See More" on a single page, while category pages paginate
+ * via {@code -oa{offset}-} URLs with no "See More" button. The worker always
+ * tries the "See More" expansion first and falls back to collecting the page's
+ * initially rendered products when the button is absent; the manager handles
+ * {@code -oa{offset}-} pagination afterward.
  */
 @Slf4j
 @Component
@@ -37,9 +42,9 @@ import java.util.concurrent.ThreadLocalRandom;
 public class AttractionProductListingWorker {
 
     private static final String TRIPADVISOR_HOMEPAGE = "https://www.tripadvisor.com/";
-    private static final String PRODUCT_LINK_MARKER = "AttractionProductReview-";
     private static final String DATADOME_MARKER = "captcha-delivery.com";
     private static final String DATADOME_CHALLENGE_TITLE = "tripadvisor.com";
+    private static final Pattern GEO_MARKER_PATTERN = Pattern.compile("-g(\\d+)-");
 
     private final AttractionProductCrawlerProperties properties;
     private final AttractionProductRepository productRepository;
@@ -56,8 +61,10 @@ public class AttractionProductListingWorker {
 
     public AttractionProductCrawlResult crawl(String url) {
         long startedAt = System.currentTimeMillis();
-        log.info("TRIPADVISOR_ATTRACTION_PRODUCT_START url={} headless={} navigationTimeoutMs={} maxItems={} seeMoreMaxClicks={}",
-                url, properties.headless(), properties.navigationTimeoutMs(), properties.maxItems(), properties.seeMoreMaxClicks());
+        AttractionListingType listingType = AttractionListingType.detect(url);
+        String linkMarker = listingType.linkMarker();
+        log.info("TRIPADVISOR_ATTRACTION_PRODUCT_START url={} listingType={} linkMarker={} headless={} navigationTimeoutMs={} maxItems={} seeMoreMaxClicks={}",
+                url, listingType, linkMarker, properties.headless(), properties.navigationTimeoutMs(), properties.maxItems(), properties.seeMoreMaxClicks());
 
         Path userDataDir = ensureUserDataDir();
         if (!diskSpaceGuard.hasEnoughSpace(userDataDir)) {
@@ -87,7 +94,7 @@ public class AttractionProductListingWorker {
             // === STEP 1: Homepage warmup — establish DataDome cookies ===
             log.info("TRIPADVISOR_ATTRACTION_PRODUCT_WARMUP url={} message=Visiting Tripadvisor homepage for DataDome cookie warming", url);
             page = navigateSafely(context, page, TRIPADVISOR_HOMEPAGE, "WARMUP");
-            boolean warmupOk = waitForRealContent(page, "WARMUP");
+            boolean warmupOk = waitForRealContent(page, "WARMUP", linkMarker);
             if (warmupOk) {
                 boolean hasDataDomeCookie = context.cookies().stream()
                         .anyMatch(cookie -> "datadome".equals(cookie.name));
@@ -98,12 +105,17 @@ public class AttractionProductListingWorker {
             }
             pause();
 
+            // Clear any stale date-range filter (TAUD cookie) left behind by a
+            // previous session; otherwise the listing renders "No tours match
+            // your filters" and yields zero products.
+            clearStaleDateFilter(page, url);
+
             // === STEP 2: Navigate to the listing page ===
             log.info("TRIPADVISOR_ATTRACTION_PRODUCT_NAVIGATE url={} message=Navigating to attraction products listing page", url);
             page = navigateSafely(context, page, url, "LISTING");
 
             // === STEP 3: Wait for DataDome challenge to resolve and real content to appear ===
-            boolean contentReady = waitForRealContent(page, "LISTING");
+            boolean contentReady = waitForRealContent(page, "LISTING", linkMarker);
 
             // === STEP 3b: Retry with reload if blocked ===
             if (!contentReady) {
@@ -116,7 +128,7 @@ public class AttractionProductListingWorker {
                 } catch (Exception e) {
                     log.debug("Reload failed: {}", e.getMessage());
                 }
-                contentReady = waitForRealContent(page, "RETRY1");
+                contentReady = waitForRealContent(page, "RETRY1", linkMarker);
             }
 
             // === STEP 3c: Full retry — re-warmup then re-navigate ===
@@ -127,26 +139,26 @@ public class AttractionProductListingWorker {
                     page.navigate(TRIPADVISOR_HOMEPAGE, new Page.NavigateOptions()
                             .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
                             .setTimeout(properties.navigationTimeoutMs()));
-                    waitForRealContent(page, "RETRY_WARMUP");
+                    waitForRealContent(page, "RETRY_WARMUP", linkMarker);
                     performHumanBehavior(page);
                     pause();
                     page.navigate(url, new Page.NavigateOptions()
                             .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
                             .setTimeout(properties.navigationTimeoutMs()));
-                    contentReady = waitForRealContent(page, "RETRY2");
+                    contentReady = waitForRealContent(page, "RETRY2", linkMarker);
                 } catch (Exception e) {
                     log.debug("Full retry navigation failed: {}", e.getMessage());
                 }
             }
 
-            // === STEP 4: Collect every product by revealing the lazy-loaded list ===
-            // The page is an infinite/virtualized list (says "95 results" but only ~28
-            // rows are in the DOM at once). "See More" loads more into state but rows
-            // only render as we scroll, so we accumulate ids across a scroll+click pass
-            // rather than relying on a single page.content() capture.
-            List<AttractionProductListing> products = collectAllProducts(page, startedAt, url);
-            log.info("TRIPADVISOR_ATTRACTION_PRODUCT_COLLECTED url={} collectedProducts={} targetMaxItems={} elapsedMs={}",
-                    url, products.size(), properties.maxItems(), elapsedMs(startedAt));
+            // === STEP 4: Collect the products rendered on this listing page ===
+            // Always use the full expansion strategy: scroll to reveal rendered rows,
+            // detect and click the "See More" button if present (for lazy-loaded
+            // single-page listings), then stop when no new products appear. The
+            // manager handles pagination to the next -oa{offset}- URL afterward.
+            List<AttractionProductListing> products = collectAllProducts(page, startedAt, url, linkMarker);
+            log.info("TRIPADVISOR_ATTRACTION_PRODUCT_COLLECTED url={} listingType={} collectedProducts={} targetMaxItems={} elapsedMs={}",
+                    url, listingType, products.size(), properties.maxItems(), elapsedMs(startedAt));
 
             // === STEP 5: Extract HTML + diagnostics ===
             performHumanBehavior(page);
@@ -159,9 +171,9 @@ public class AttractionProductListingWorker {
             String title = page.title();
             boolean stillBlocked = isDataDomeChallenge(html, title);
             String htmlSnapshotPath = saveHtmlSnapshot(html);
-            int productLinkOccurrences = countOccurrences(html, PRODUCT_LINK_MARKER);
+            int productLinkOccurrences = countOccurrences(html, linkMarker);
 
-            log.info("TRIPADVISOR_ATTRACTION_PRODUCT_FETCHED url={} title='{}' htmlChars={} htmlBytes={} productLinkOccurrences={} productCount={} stillBlocked={} snapshotPath={} elapsedMs={}",
+            log.info("TRIPADVISOR_ATTRACTION_PRODUCT_FETCHED url={} title='{}' htmlChars={} htmlBytes={} poiLinkOccurrences={} productCount={} stillBlocked={} snapshotPath={} elapsedMs={}",
                     url, title, html == null ? 0 : html.length(), byteSize(html), productLinkOccurrences,
                     products.size(), stillBlocked, htmlSnapshotPath, elapsedMs(startedAt));
 
@@ -174,8 +186,9 @@ public class AttractionProductListingWorker {
 
             // === STEP 6: Persist ===
             if (products.isEmpty()) {
-                log.warn("TRIPADVISOR_ATTRACTION_PRODUCT_ZERO_EXTRACTION_DIAGNOSTIC url={} reason='No parseable AttractionProductReview links collected' htmlBytes={} productLinkOccurrences={} title='{}' snapshotPath={}",
-                        url, byteSize(html), productLinkOccurrences, title, htmlSnapshotPath);
+                log.warn("TRIPADVISOR_ATTRACTION_PRODUCT_ZERO_EXTRACTION_DIAGNOSTIC url={} reason='No parseable {} links collected' htmlBytes={} poiLinkOccurrences={} title='{}' snapshotPath={}",
+                        url, linkMarker, byteSize(html), productLinkOccurrences, title, htmlSnapshotPath);
+                log.warn("TRIPADVISOR_ATTRACTION_PRODUCT_ZERO_EXTRACTION_CONTEXT url={} listingType={}", url, listingType);
             }
             logProductSummary(products);
 
@@ -241,25 +254,25 @@ public class AttractionProductListingWorker {
      *
      * @return the deduplicated list of products observed, in first-seen order.
      */
-    private List<AttractionProductListing> collectAllProducts(Page page, long startedAt, String sourceListingUrl) {
+    private List<AttractionProductListing> collectAllProducts(Page page, long startedAt, String sourceListingUrl, String linkMarker) {
         Map<String, AttractionProductListing> collected = new LinkedHashMap<>();
         int clicks = 0;
         int stableRounds = 0;
         int maxRounds = properties.seeMoreMaxClicks() + 30;
-        log.info("TRIPADVISOR_ATTRACTION_PRODUCT_EXPAND_START maxItems={} seeMoreMaxClicks={}",
-                properties.maxItems(), properties.seeMoreMaxClicks());
+        log.info("TRIPADVISOR_ATTRACTION_PRODUCT_EXPAND_START maxItems={} seeMoreMaxClicks={} linkMarker={}",
+                properties.maxItems(), properties.seeMoreMaxClicks(), linkMarker);
 
         for (int round = 0; round < maxRounds && collected.size() < properties.maxItems(); round++) {
             int beforeSize = collected.size();
-            collectRenderedProducts(page, collected, sourceListingUrl);
+            collectRenderedProducts(page, collected, sourceListingUrl, linkMarker);
 
             // Scroll down first: the "See More" button only appears after the
             // current batch (~30 items) is scrolled into view, and scrolling also
             // forces the virtualized/infinite list to render its next window.
-            humanScrollDown(page);
+            humanScrollDown(page, linkMarker);
             pause();
 
-            collectRenderedProducts(page, collected, sourceListingUrl);
+            collectRenderedProducts(page, collected, sourceListingUrl, linkMarker);
 
             Locator seeMore = findSeeMoreButton(page);
             if (seeMore != null) {
@@ -306,12 +319,17 @@ public class AttractionProductListingWorker {
      * newly seen ids into {@code collected}. Because the list is virtualized we
      * re-read on every scroll round so ids that render only briefly are captured.
      */
-    private void collectRenderedProducts(Page page, Map<String, AttractionProductListing> collected, String sourceListingUrl) {
+    private void collectRenderedProducts(Page page, Map<String, AttractionProductListing> collected, String sourceListingUrl, String linkMarker) {
+        // Restrict to POIs in the same city as the listing (e.g. g293974 for
+        // Istanbul). Tripadvisor sprinkles recommendation/sponsored carousels
+        // with attractions from other cities onto the page; without this filter
+        // an Istanbul listing would ingest POIs from New York, Saigon, etc.
+        String listingGeo = extractListingGeo(sourceListingUrl);
         try {
             Object raw = page.evaluate("""
                     () => {
                       const seen = {};
-                      document.querySelectorAll('a[href*="AttractionProductReview-"]').forEach(a => {
+                      document.querySelectorAll('a[href*="%s"]').forEach(a => {
                         const href = a.getAttribute('href') || '';
                         const m = href.match(/-d(\\d+)-/);
                         if (!m) return;
@@ -324,7 +342,7 @@ public class AttractionProductListingWorker {
                       });
                       return Object.values(seen);
                     }
-                    """);
+                    """.formatted(linkMarker));
             if (!(raw instanceof List<?> items)) {
                 return;
             }
@@ -339,6 +357,9 @@ public class AttractionProductListingWorker {
                 }
                 String normalizedUrl = normalizeProductUrl(String.valueOf(urlObj));
                 if (normalizedUrl == null) {
+                    continue;
+                }
+                if (listingGeo != null && !normalizedUrl.contains("-" + listingGeo + "-")) {
                     continue;
                 }
                 Long tripadvisorId;
@@ -363,6 +384,18 @@ public class AttractionProductListingWorker {
         } catch (Exception e) {
             log.debug("collectRenderedProducts failed: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Extracts the Tripadvisor geo marker (e.g. {@code g293974}) from a listing
+     * URL so collected POIs can be restricted to the same city.
+     */
+    private String extractListingGeo(String listingUrl) {
+        if (listingUrl == null || listingUrl.isBlank()) {
+            return null;
+        }
+        Matcher matcher = GEO_MARKER_PATTERN.matcher(listingUrl);
+        return matcher.find() ? "g" + matcher.group(1) : null;
     }
 
     private String normalizeProductUrl(String href) {
@@ -490,13 +523,13 @@ public class AttractionProductListingWorker {
      * otherwise we fall back to window scrolling. This forces the virtualized
      * list to render rows that have been loaded in to state by "See More".
      */
-    private void humanScrollDown(Page page) {
+    private void humanScrollDown(Page page, String linkMarker) {
         try {
             int steps = 3 + ThreadLocalRandom.current().nextInt(4); // 3-6 scroll steps
             for (int i = 0; i < steps; i++) {
                 page.evaluate("""
                         () => {
-                          const anchor = document.querySelector('a[href*="AttractionProductReview-"]');
+                          const anchor = document.querySelector('a[href*="%s"]');
                           if (anchor) {
                             let el = anchor.parentElement;
                             while (el && el !== document.body) {
@@ -509,7 +542,7 @@ public class AttractionProductListingWorker {
                           }
                           window.scrollBy(0, Math.round(window.innerHeight * 0.7));
                         }
-                        """);
+                        """.formatted(linkMarker));
                 Thread.sleep(500 + ThreadLocalRandom.current().nextLong(1000));
                 if (ThreadLocalRandom.current().nextInt(3) == 0) {
                     page.mouse().wheel(0, 120 + ThreadLocalRandom.current().nextInt(180));
@@ -525,9 +558,31 @@ public class AttractionProductListingWorker {
         }
     }
 
+    /**
+     * Clears the {@code TAUD} cookie, which Tripadvisor uses to remember the
+     * previously selected travel date range. A stale value (e.g. a specific
+     * future date) makes the listing render "No tours match your filters" even
+     * though the page itself loads fine. Clearing it before navigation forces
+     * the unfiltered "all products" listing. Non-fatal.
+     */
+    private void clearStaleDateFilter(Page page, String url) {
+        try {
+            page.evaluate("""
+                    () => {
+                      const expired = '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+                      document.cookie = 'TAUD' + expired + '; domain=.tripadvisor.com';
+                      document.cookie = 'TAUD' + expired;
+                    }
+                    """);
+            log.info("TRIPADVISOR_ATTRACTION_PRODUCT_CLEAR_DATE_FILTER url={} message=Cleared stale TAUD date-range cookie", url);
+        } catch (Exception e) {
+            log.debug("Failed to clear TAUD date-filter cookie (non-fatal). url={}, error={}", url, e.getMessage());
+        }
+    }
+
     // ==================== DataDome Challenge Handling ====================
 
-    private boolean waitForRealContent(Page page, String phase) {
+    private boolean waitForRealContent(Page page, String phase, String linkMarker) {
         long deadline = System.currentTimeMillis() + 45_000;
         int attempt = 0;
         boolean challengeDetected = false;
@@ -538,7 +593,7 @@ public class AttractionProductListingWorker {
                 String currentHtml = page.content();
                 String currentTitle = page.title();
 
-                if (currentHtml.contains(PRODUCT_LINK_MARKER)) {
+                if (currentHtml.contains(linkMarker)) {
                     log.info("TRIPADVISOR_ATTRACTION_PRODUCT_CONTENT_FOUND phase={} attempt={} title='{}' htmlLen={}",
                             phase, attempt, currentTitle, currentHtml.length());
                     return true;
@@ -553,7 +608,7 @@ public class AttractionProductListingWorker {
                 } else if (currentHtml.length() > 15_000) {
                     Thread.sleep(3000);
                     currentHtml = page.content();
-                    if (currentHtml.contains(PRODUCT_LINK_MARKER)) {
+                    if (currentHtml.contains(linkMarker)) {
                         return true;
                     }
                     if (currentHtml.length() > 15_000 && !isDataDomeChallenge(currentHtml, page.title())) {

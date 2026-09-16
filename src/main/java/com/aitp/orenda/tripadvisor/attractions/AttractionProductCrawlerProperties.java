@@ -6,6 +6,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record AttractionProductCrawlerProperties(
         boolean enabled,
         String baseUrl,
+        AttractionProductPaginationMode paginationMode,
+        int pageSize,
+        int maxEmptyPages,
         int concurrency,
         int maxItems,
         int seeMoreMaxClicks,
@@ -29,6 +32,15 @@ public record AttractionProductCrawlerProperties(
     public AttractionProductCrawlerProperties {
         if (baseUrl == null || baseUrl.isBlank()) {
             baseUrl = DEFAULT_BASE_URL;
+        }
+        if (paginationMode == null) {
+            paginationMode = AttractionProductPaginationMode.NEXT_PAGE_URL;
+        }
+        if (pageSize < 1) {
+            pageSize = 30;
+        }
+        if (maxEmptyPages < 1) {
+            maxEmptyPages = 1;
         }
         if (concurrency < 1) {
             concurrency = 1;

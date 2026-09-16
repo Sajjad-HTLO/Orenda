@@ -36,11 +36,22 @@ public class AttractionProductRepository {
         return (categoryName != null && !categoryName.isBlank()) ? categoryName : subcategory;
     }
 
+    /**
+     * Resolves the {@code poi.category} for a crawled row from the listing it
+     * came from: {@code attraction} for {@code /Attractions-...-Activities-...}
+     * category listings (museums, malls, ...) and {@code activity} for bookable
+     * {@code /Attraction_Products-...} tour listings.
+     */
+    private String resolveCategory(String sourceListingUrl) {
+        return AttractionListingType.detect(sourceListingUrl).poiCategory();
+    }
+
     public int upsertListings(List<AttractionProductListing> listings, String categoryName) {
         String sub = resolveSubcategory(categoryName);
         log.info("Tripadvisor attraction product persistence starting. productListings={}, subcategory='{}'", listings.size(), sub);
         int insertedOrUpdated = 0;
         for (AttractionProductListing listing : listings) {
+            String category = resolveCategory(listing.sourceListingUrl());
             int rows = jdbcTemplate.update("""
                     INSERT INTO poi (
                         osm_id, osm_type, wikidata_id, name_tr, name_en,
@@ -49,7 +60,7 @@ public class AttractionProductRepository {
                         last_synced_at, updated_at
                     ) VALUES (
                         ?, 'T', NULL, ?, ?,
-                        'activity', ?, NULL, NULL,
+                        ?, ?, NULL, NULL,
                         ?, ARRAY['tripadvisor']::text[], ?::jsonb, false,
                         NOW(), NOW()
                     )
@@ -70,6 +81,7 @@ public class AttractionProductRepository {
                     listing.tripadvisorId(),
                     nameOrFallback(listing),
                     listing.name(),
+                    category,
                     sub,
                     completenessScore(listing),
                     attributesJson(listing, sub));
@@ -82,7 +94,7 @@ public class AttractionProductRepository {
 
     public long countAttractionProducts() {
         Long count = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM poi WHERE osm_type = 'T' AND category = 'activity'", Long.class);
+                "SELECT COUNT(*) FROM poi WHERE osm_type = 'T' AND category IN ('activity', 'attraction', 'restaurant')", Long.class);
         return count == null ? 0 : count;
     }
 
@@ -125,7 +137,7 @@ public class AttractionProductRepository {
                        p.attributes->>'source_listing_url' AS source_listing_url
                 FROM poi p
                 WHERE p.osm_type = 'T'
-                  AND p.category = 'activity'
+                  AND p.category IN ('activity', 'attraction', 'restaurant')
                   AND NOT EXISTS (SELECT 1 FROM poi_review_crawled r WHERE r.poi_id = p.id)
                 ORDER BY p.updated_at
                 """, (rs, rowNum) -> AttractionProductListing.builder()
@@ -151,7 +163,7 @@ public class AttractionProductRepository {
                        attributes->>'source_listing_url' AS source_listing_url
                 FROM poi
                 WHERE osm_type = 'T'
-                  AND category = 'activity'
+                  AND category IN ('activity', 'attraction', 'restaurant')
                   AND NOT (attributes ? 'image_urls')
                 ORDER BY updated_at
                 """, (rs, rowNum) -> AttractionProductListing.builder()
@@ -233,6 +245,7 @@ public class AttractionProductRepository {
         String name = nameOrFallback(detail);
         short completeness = completenessScore(detail);
         String attributes = attributesJson(detail, sub);
+        String category = resolveCategory(detail.sourceListingUrl());
 
         int rows;
         if (detail.latitude() != null && detail.longitude() != null) {
@@ -244,7 +257,7 @@ public class AttractionProductRepository {
                         last_synced_at, updated_at
                     ) VALUES (
                         ?, 'T', NULL, ?, ?,
-                        'activity', ?, ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, NULL,
+                        ?, ?, ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, NULL,
                         ?, ARRAY['tripadvisor']::text[], ?::jsonb, false,
                         NOW(), NOW()
                     )
@@ -265,6 +278,7 @@ public class AttractionProductRepository {
                     detail.tripadvisorId(),
                     name,
                     detail.name(),
+                    category,
                     sub,
                     detail.longitude(),
                     detail.latitude(),
@@ -279,7 +293,7 @@ public class AttractionProductRepository {
                         last_synced_at, updated_at
                     ) VALUES (
                         ?, 'T', NULL, ?, ?,
-                        'activity', ?, NULL, NULL,
+                        ?, ?, NULL, NULL,
                         ?, ARRAY['tripadvisor']::text[], ?::jsonb, false,
                         NOW(), NOW()
                     )
@@ -299,6 +313,7 @@ public class AttractionProductRepository {
                     detail.tripadvisorId(),
                     name,
                     detail.name(),
+                    category,
                     sub,
                     completeness,
                     attributes);
@@ -355,6 +370,7 @@ public class AttractionProductRepository {
         appendJsonField(json, "rating", detail.rating());
         appendJsonField(json, "review_count", detail.reviewCount());
         appendJsonField(json, "price", detail.price());
+        appendJsonField(json, "cost", detail.cost());
         appendJsonField(json, "duration", detail.duration());
         appendJsonField(json, "cancellation_policy", detail.cancellationPolicy());
         appendJsonField(json, "description", detail.description());

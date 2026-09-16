@@ -5,15 +5,22 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Crawls the single {@code Attraction_Products} listing page (all items are
- * revealed via the "See More" button — no pagination), then crawls each
- * product's detail page to enrich it and download image binaries.
+ * Crawls the Tripadvisor attraction listing and enriches each product's detail
+ * page (images + reviews).
+ * <p>
+ * On every listing page the crawler first detects whether a "See More" button
+ * is present and clicks it repeatedly to expand the lazy-loaded product list.
+ * When no "See More" button is found (category listings that use
+ * {@code -oa{offset}-} pagination instead), the manager generates the next
+ * page URL automatically. After each page the next URL is persisted back to
+ * {@code application.properties} so a restart resumes where it left off.
  */
 @Slf4j
 @Service
@@ -21,37 +28,41 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AttractionProductCrawlerManager {
 
     private final AttractionProductCrawlerProperties properties;
+    private final AttractionProductPaginationGenerator paginationGenerator;
     private final AttractionProductListingWorker listingWorker;
     private final AttractionProductDetailWorker detailWorker;
     private final AttractionProductRepository productRepository;
+    private final AttractionProductPropertiesFileUpdater propertiesFileUpdater;
 
     private final Set<String> processedProductUrls = ConcurrentHashMap.newKeySet();
 
     public AttractionProductCrawlerManager(
             AttractionProductCrawlerProperties properties,
+            AttractionProductPaginationGenerator paginationGenerator,
             AttractionProductListingWorker listingWorker,
             AttractionProductDetailWorker detailWorker,
-            AttractionProductRepository productRepository) {
+            AttractionProductRepository productRepository,
+            AttractionProductPropertiesFileUpdater propertiesFileUpdater) {
         this.properties = properties;
+        this.paginationGenerator = paginationGenerator;
         this.listingWorker = listingWorker;
         this.detailWorker = detailWorker;
         this.productRepository = productRepository;
+        this.propertiesFileUpdater = propertiesFileUpdater;
     }
 
     public void crawl() {
         long startedAt = System.currentTimeMillis();
-        String url = properties.baseUrl();
-        log.info("Tripadvisor attraction product crawler manager starting. baseUrl={}, concurrency={}, maxItems={}, seeMoreMaxClicks={}, headless={}, listingMaxAttempts={}, listingRetryDelayMs={}, skipListingIfPresent={}",
-                url, properties.concurrency(), properties.maxItems(), properties.seeMoreMaxClicks(), properties.headless(),
+        log.info("Tripadvisor attraction product crawler manager starting. baseUrl={}, pageSize={}, maxEmptyPages={}, concurrency={}, maxItems={}, seeMoreMaxClicks={}, headless={}, listingMaxAttempts={}, listingRetryDelayMs={}, skipListingIfPresent={}",
+                properties.baseUrl(), properties.pageSize(), properties.maxEmptyPages(),
+                properties.concurrency(), properties.maxItems(), properties.seeMoreMaxClicks(), properties.headless(),
                 properties.listingMaxAttempts(), properties.listingRetryDelayMs(), properties.skipListingIfPresent());
 
         // Skip the listing re-crawl when products are already persisted and the
         // option is enabled: re-crawling the listing burns DataDome's rate limit
         // and is pointless. Go straight to enriching the products that still
-        // need their images fetched.
+        // need their images or reviews fetched.
         if (properties.skipListingIfPresent() && productRepository.countAttractionProducts() > 0) {
-            // Process products that still need enrichment: either missing images
-            // or missing crawled traveler reviews.
             Map<String, AttractionProductListing> toEnrich = new java.util.LinkedHashMap<>();
             for (AttractionProductListing listing : productRepository.findAttractionProductsMissingImages()) {
                 toEnrich.put(listing.url(), listing);
@@ -61,7 +72,7 @@ public class AttractionProductCrawlerManager {
             }
             List<AttractionProductListing> pending = new ArrayList<>(toEnrich.values());
             log.info("Tripadvisor attraction product listing skipped (skip-listing-if-present). existingAttractionProducts={}, productsToEnrich={}, baseUrl={}",
-                    productRepository.countAttractionProducts(), pending.size(), url);
+                    productRepository.countAttractionProducts(), pending.size(), properties.baseUrl());
             int detailed = crawlProductDetails(pending, null);
             log.info("Tripadvisor attraction product crawler manager finished (skip-listing mode). productsToEnrich={}, detailedProducts={}, totalAttractionProducts={}, elapsedMs={}",
                     pending.size(), detailed,
@@ -69,6 +80,85 @@ public class AttractionProductCrawlerManager {
             return;
         }
 
+        crawlPaginated(startedAt);
+    }
+
+    /**
+     * Paginated discovery (default): walks the listing pages by generating the
+     * next {@code -oa{offset}-} URL, enriching each page's products, until
+     * {@code max-empty-pages} consecutive empty/failed pages or {@code max-items}
+     * is reached. The next page URL is persisted after each page so a restart
+     * resumes from there.
+     */
+    private void crawlPaginated(long startedAt) {
+        int offset = paginationGenerator.baseOffset();
+        int consecutiveEmptyPages = 0;
+        int submittedPages = 0;
+        int completedPages = 0;
+        int failedPages = 0;
+        int extractedProducts = 0;
+        int detailedProducts = 0;
+        Set<String> seenProductUrls = new HashSet<>();
+
+        while (consecutiveEmptyPages < properties.maxEmptyPages()
+                && extractedProducts < properties.maxItems()) {
+            String url = paginationGenerator.pageUrlForOffset(offset);
+            submittedPages++;
+
+            log.info("Tripadvisor attraction product listing page starting. offset={}, url={}", offset, url);
+            AttractionProductCrawlResult listingResult = crawlListingPageWithRetry(url);
+
+            if (listingResult == null || !listingResult.successful()) {
+                failedPages++;
+                consecutiveEmptyPages++;
+                log.warn("Tripadvisor attraction product listing page failed. offset={}, url={}, error={}",
+                        offset, url, listingResult == null ? "no attempt made" : listingResult.errorMessage());
+                offset = paginationGenerator.nextOffset(offset);
+                persistNextPageUrl(offset);
+                continue;
+            }
+
+            completedPages++;
+            List<AttractionProductListing> newProducts = listingResult.products().stream()
+                    .filter(p -> seenProductUrls.add(p.url()))
+                    .toList();
+            extractedProducts += newProducts.size();
+            log.info("Tripadvisor attraction product listing page completed. offset={}, url={}, products={}, newProducts={}, totalSeen={}, category='{}'",
+                    offset, url, listingResult.productCount(), newProducts.size(),
+                    seenProductUrls.size(), listingResult.categoryName());
+
+            int pageDetailed = crawlProductDetails(newProducts, listingResult.categoryName());
+            detailedProducts += pageDetailed;
+
+            if (newProducts.isEmpty()) {
+                consecutiveEmptyPages++;
+            } else {
+                consecutiveEmptyPages = 0;
+            }
+
+            log.info("Tripadvisor attraction product listing page finished. offset={}, url={}, products={}, newProducts={}, detailed={}, totalAttractionProducts={}",
+                    offset, url, listingResult.productCount(), newProducts.size(), pageDetailed,
+                    productRepository.countAttractionProducts());
+
+            offset = paginationGenerator.nextOffset(offset);
+            if (!newProducts.isEmpty()) {
+                persistNextPageUrl(offset);
+            } else {
+                log.info("Tripadvisor attraction product listing stopped. reason='page returned no new products (unsupported -oa pagination or exhausted listing)' lastProductiveUrl={}, consecutiveEmptyPages={}, totalSeen={}",
+                        url, consecutiveEmptyPages, seenProductUrls.size());
+            }
+        }
+
+        log.info("Tripadvisor attraction product crawler manager finished. submittedPages={}, completedPages={}, failedPages={}, extractedProducts={}, detailedProducts={}, totalAttractionProducts={}, elapsedMs={}",
+                submittedPages, completedPages, failedPages, extractedProducts, detailedProducts,
+                productRepository.countAttractionProducts(), System.currentTimeMillis() - startedAt);
+    }
+
+    /**
+     * Crawls a single listing page with the configured retry/backoff. Returns the
+     * last attempt's result (failed when every attempt failed).
+     */
+    private AttractionProductCrawlResult crawlListingPageWithRetry(String url) {
         AttractionProductCrawlResult listingResult = null;
         for (int attempt = 1; attempt <= properties.listingMaxAttempts(); attempt++) {
             log.info("Tripadvisor attraction product listing page starting. attempt={}/{}, url={}",
@@ -89,7 +179,7 @@ public class AttractionProductCrawlerManager {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     log.error("Tripadvisor attraction product crawler interrupted while waiting to retry listing page.");
-                    return;
+                    return listingResult;
                 }
             }
         }
@@ -98,17 +188,22 @@ public class AttractionProductCrawlerManager {
             log.error("Tripadvisor attraction product listing page failed after {} attempts. url={}, error={}",
                     properties.listingMaxAttempts(), url,
                     listingResult == null ? "no attempt made" : listingResult.errorMessage());
-            return;
+            return listingResult;
         }
 
         log.info("Tripadvisor attraction product listing page completed. url={}, products={}, category='{}'",
                 url, listingResult.productCount(), listingResult.categoryName());
+        return listingResult;
+    }
 
-        int detailed = crawlProductDetails(listingResult.products(), listingResult.categoryName());
-
-        log.info("Tripadvisor attraction product crawler manager finished. listingUrl={}, extractedProducts={}, detailedProducts={}, totalAttractionProducts={}, elapsedMs={}",
-                url, listingResult.productCount(), detailed,
-                productRepository.countAttractionProducts(), System.currentTimeMillis() - startedAt);
+    /**
+     * Persists the URL of the next page to process back into the
+     * {@code application.properties} file so a restarted crawler resumes from
+     * where this run left off. Non-fatal: failures are logged and swallowed.
+     */
+    private void persistNextPageUrl(int nextOffset) {
+        String nextUrl = paginationGenerator.pageUrlForOffset(nextOffset);
+        propertiesFileUpdater.updateBaseUrl(nextUrl);
     }
 
     private int crawlProductDetails(List<AttractionProductListing> products, String categoryName) {

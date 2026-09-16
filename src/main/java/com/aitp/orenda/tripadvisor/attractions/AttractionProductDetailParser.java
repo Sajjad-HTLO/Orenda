@@ -35,6 +35,8 @@ public class AttractionProductDetailParser {
             "([0-9]+(?:\\s*(?:to|[-–])\\s*[0-9]+(?:\\.[0-9]+)?)?\\s*(?:hours?|hrs?|days?|minutes?|mins?))",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern PRICE_PATTERN = Pattern.compile("(\\$|€|£|TL\\s?)\\s?([0-9]+(?:[.,][0-9]{2})?)");
+    private static final Pattern COST_CONTEXT_PATTERN = Pattern.compile(
+            "(?i)(admission|entry|entrance|ticket)\\s*(?:fee|price|cost)?[^0-9]{0,50}(\\$|€|£|₺|TL\\s?)?\\s?([0-9]+(?:[.,][0-9]{2})?)");
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -62,6 +64,9 @@ public class AttractionProductDetailParser {
                 offersPrice(ld),
                 selectText(document, "[data-automation*='price']"),
                 selectText(document, "[class*=price]"));
+        String cost = firstNonBlank(
+                offersPrice(ld),
+                costFromBody(document));
         String duration = firstNonBlank(
                 text(ld, "duration"),
                 selectText(document, "[data-automation*='duration']"),
@@ -85,6 +90,7 @@ public class AttractionProductDetailParser {
                 .rating(rating)
                 .reviewCount(reviewCount)
                 .price(price)
+                .cost(cost)
                 .duration(duration)
                 .cancellationPolicy(cancellationPolicy)
                 .description(description)
@@ -92,9 +98,9 @@ public class AttractionProductDetailParser {
                 .sourceListingUrl(sourceListingUrl)
                 .build();
 
-        log.info("TRIPADVISOR_ATTRACTION_PRODUCT_DETAIL_PARSED url={} tripadvisorId={} name='{}' lat={} lon={} rating={} reviewCount={} price='{}' duration='{}' cancellation='{}' descriptionChars={} imageCount={}",
+        log.info("TRIPADVISOR_ATTRACTION_PRODUCT_DETAIL_PARSED url={} tripadvisorId={} name='{}' lat={} lon={} rating={} reviewCount={} price='{}' cost='{}' duration='{}' cancellation='{}' descriptionChars={} imageCount={}",
                 url, detail.tripadvisorId(), detail.name(), detail.latitude(), detail.longitude(),
-                detail.rating(), detail.reviewCount(), detail.price(), detail.duration(),
+                detail.rating(), detail.reviewCount(), detail.price(), detail.cost(), detail.duration(),
                 detail.cancellationPolicy(),
                 detail.description() == null ? 0 : detail.description().length(),
                 detail.imageUrls() == null ? 0 : detail.imageUrls().size());
@@ -212,6 +218,25 @@ public class AttractionProductDetailParser {
             case "USD" -> "$";
             default -> currency + " ";
         };
+    }
+
+    /**
+     * Best-effort extraction of a POI entry cost (admission / entry / ticket
+     * fee) from the page body text, e.g. "Admission: 150 TL". Returns null when
+     * no such phrasing with a price is present.
+     */
+    private String costFromBody(Document document) {
+        String body = document.body() == null ? null : document.body().text();
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        Matcher matcher = COST_CONTEXT_PATTERN.matcher(body);
+        if (matcher.find()) {
+            String currency = matcher.group(2);
+            String amount = matcher.group(3);
+            return clean(currency == null || currency.isBlank() ? amount : currency + amount);
+        }
+        return null;
     }
 
     // ==================== DOM fallbacks ====================

@@ -20,6 +20,7 @@ public record AttractionProductDetail(
         Double rating,
         Integer reviewCount,
         String price,
+        String cost,
         String duration,
         String cancellationPolicy,
         String description,
