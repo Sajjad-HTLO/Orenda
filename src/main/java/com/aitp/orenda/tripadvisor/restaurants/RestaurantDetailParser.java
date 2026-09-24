@@ -26,7 +26,7 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.restaurants.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class RestaurantDetailParser {
 
     private static final Pattern TRIPADVISOR_ID_PATTERN = Pattern.compile("-d(\\d+)-");

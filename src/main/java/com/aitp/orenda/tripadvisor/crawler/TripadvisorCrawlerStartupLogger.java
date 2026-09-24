@@ -54,7 +54,8 @@ public class TripadvisorCrawlerStartupLogger implements ApplicationRunner {
             return;
         }
 
-        log.info("Tripadvisor crawler is ENABLED. baseUrl={}, concurrency={}, pageSize={}, maxEmptyPages={}, singlePageOnly={}, delayRangeMs={}..{}, navigationTimeoutMs={}, headless={}",
-                baseUrl, concurrency, pageSize, maxEmptyPages, singlePageOnly, minDelayMs, maxDelayMs, navigationTimeoutMs, headless);
+        TripadvisorListingType listingType = TripadvisorListingType.detect(baseUrl);
+        log.info("Tripadvisor crawler is ENABLED. baseUrl={}, detectedListingType={}, concurrency={}, pageSize={}, maxEmptyPages={}, singlePageOnly={}, delayRangeMs={}..{}, navigationTimeoutMs={}, headless={}",
+                baseUrl, listingType, concurrency, pageSize, maxEmptyPages, singlePageOnly, minDelayMs, maxDelayMs, navigationTimeoutMs, headless);
     }
 }

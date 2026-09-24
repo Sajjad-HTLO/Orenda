@@ -31,7 +31,7 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.attraction-products.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class AttractionProductReviewParser {
 
     private static final Pattern TRIPADVISOR_ID_PATTERN = Pattern.compile("-d(\\d+)-");

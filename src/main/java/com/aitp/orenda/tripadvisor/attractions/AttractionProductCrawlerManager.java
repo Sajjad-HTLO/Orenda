@@ -1,5 +1,8 @@
 package com.aitp.orenda.tripadvisor.attractions;
 
+import com.aitp.orenda.tripadvisor.config.TripadvisorCrawlerProperties;
+import com.aitp.orenda.tripadvisor.crawler.CrawlerPropertiesFileUpdater;
+import com.aitp.orenda.tripadvisor.crawler.TripadvisorPaginationGenerator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -24,25 +27,29 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Slf4j
 @Service
-@ConditionalOnProperty(name = "tripadvisor.crawler.attraction-products.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class AttractionProductCrawlerManager {
 
-    private final AttractionProductCrawlerProperties properties;
-    private final AttractionProductPaginationGenerator paginationGenerator;
+    private static final long MAX_LISTING_RETRY_BACKOFF_MS = 3_600_000L;
+    private static final long MAX_DETAIL_BLOCK_BACKOFF_MS = 3_600_000L;
+    private static final int DETAIL_BLOCK_BACKOFF_AFTER_FAILURES = 2;
+
+    private final TripadvisorCrawlerProperties properties;
+    private final TripadvisorPaginationGenerator paginationGenerator;
     private final AttractionProductListingWorker listingWorker;
     private final AttractionProductDetailWorker detailWorker;
     private final AttractionProductRepository productRepository;
-    private final AttractionProductPropertiesFileUpdater propertiesFileUpdater;
+    private final CrawlerPropertiesFileUpdater propertiesFileUpdater;
 
     private final Set<String> processedProductUrls = ConcurrentHashMap.newKeySet();
 
     public AttractionProductCrawlerManager(
-            AttractionProductCrawlerProperties properties,
-            AttractionProductPaginationGenerator paginationGenerator,
+            TripadvisorCrawlerProperties properties,
+            TripadvisorPaginationGenerator paginationGenerator,
             AttractionProductListingWorker listingWorker,
             AttractionProductDetailWorker detailWorker,
             AttractionProductRepository productRepository,
-            AttractionProductPropertiesFileUpdater propertiesFileUpdater) {
+            CrawlerPropertiesFileUpdater propertiesFileUpdater) {
         this.properties = properties;
         this.paginationGenerator = paginationGenerator;
         this.listingWorker = listingWorker;
@@ -63,6 +70,11 @@ public class AttractionProductCrawlerManager {
         // and is pointless. Go straight to enriching the products that still
         // need their images or reviews fetched.
         if (properties.skipListingIfPresent() && productRepository.countAttractionProducts() > 0) {
+            if (!properties.detailsEnabled()) {
+                log.info("Tripadvisor attraction product crawler skipped (skip-listing-if-present but details-enabled=false). totalAttractionProducts={}",
+                        productRepository.countAttractionProducts());
+                return;
+            }
             Map<String, AttractionProductListing> toEnrich = new java.util.LinkedHashMap<>();
             for (AttractionProductListing listing : productRepository.findAttractionProductsMissingImages()) {
                 toEnrich.put(listing.url(), listing);
@@ -127,7 +139,13 @@ public class AttractionProductCrawlerManager {
                     offset, url, listingResult.productCount(), newProducts.size(),
                     seenProductUrls.size(), listingResult.categoryName());
 
-            int pageDetailed = crawlProductDetails(newProducts, listingResult.categoryName());
+            int pageDetailed = 0;
+            if (properties.detailsEnabled()) {
+                pageDetailed = crawlProductDetails(newProducts, listingResult.categoryName());
+            } else {
+                log.info("Tripadvisor attraction product detail stage skipped (details-enabled=false). offset={}, url={}, products={}",
+                        offset, url, newProducts.size());
+            }
             detailedProducts += pageDetailed;
 
             if (newProducts.isEmpty()) {
@@ -172,10 +190,13 @@ public class AttractionProductCrawlerManager {
             log.warn("Tripadvisor attraction product listing page failed. attempt={}/{}, url={}, error={}",
                     attempt, properties.listingMaxAttempts(), url, listingResult.errorMessage());
             if (attempt < properties.listingMaxAttempts()) {
-                log.info("Tripadvisor attraction product listing retry scheduled in {}ms (DataDome blocks are usually transient). attempt={}",
-                        properties.listingRetryDelayMs(), attempt);
+                long backoffMs = Math.min(
+                        properties.listingRetryDelayMs() * (1L << (attempt - 1)),
+                        MAX_LISTING_RETRY_BACKOFF_MS);
+                log.info("Tripadvisor attraction product listing retry scheduled in {}ms (exponential backoff). attempt={}",
+                        backoffMs, attempt);
                 try {
-                    Thread.sleep(properties.listingRetryDelayMs());
+                    Thread.sleep(backoffMs);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     log.error("Tripadvisor attraction product crawler interrupted while waiting to retry listing page.");
@@ -241,6 +262,7 @@ public class AttractionProductCrawlerManager {
         int succeeded = 0;
         int failed = 0;
         int recycled = 0;
+        int consecutiveBlockFailures = 0;
         // One shared browser/context for the whole detail stage: the DataDome
         // cookie established on the first product persists across all of them,
         // which is what avoids the recurring "access temporarily restricted"
@@ -257,8 +279,19 @@ public class AttractionProductCrawlerManager {
                 if (shared == null) {
                     shared = detailWorker.openSharedBrowser();
                 }
+                // When DataDome is hard-blocking the detail pages (many
+                // consecutive failures), back off exponentially between
+                // products instead of hammering the block page. Success
+                // resets the escalation.
+                if (consecutiveBlockFailures >= DETAIL_BLOCK_BACKOFF_AFTER_FAILURES) {
+                    long backoffMs = detailBlockBackoffMs(consecutiveBlockFailures);
+                    log.info("Tripadvisor attraction product detail block-backoff sleeping {}ms before product {}/{} (consecutiveFailures={})",
+                            backoffMs, index, pending.size(), consecutiveBlockFailures);
+                    sleepQuietly(backoffMs);
+                }
                 AttractionProductDetailCrawlResult detailResult = detailWorker.crawl(product, shared.context(), categoryName);
                 if (detailResult.successful()) {
+                    consecutiveBlockFailures = 0;
                     succeeded++;
                     processedProductUrls.add(normalizeProductKey(detailResult.detail().url()));
                     log.info("Tripadvisor attraction product detail result {}/{}. tripadvisorId={}, url={}, status=SUCCESS, name='{}', rating={}, reviewCount={}, images={}",
@@ -266,6 +299,7 @@ public class AttractionProductCrawlerManager {
                             detailResult.detail().name(), detailResult.detail().rating(), detailResult.detail().reviewCount(),
                             detailResult.detail().imageUrls() == null ? 0 : detailResult.detail().imageUrls().size());
                 } else {
+                    consecutiveBlockFailures++;
                     failed++;
                     log.warn("Tripadvisor attraction product detail result {}/{}. status=FAILED, reason='{}'",
                             index, pending.size(), detailResult.errorMessage());
@@ -305,6 +339,34 @@ public class AttractionProductCrawlerManager {
                 || lower.contains("delayedstartuppromise")
                 || lower.contains("browsercontext.newpage")
                 || lower.contains("protocol error");
+    }
+
+    /**
+     * Exponential block-backoff for the detail stage: while DataDome keeps
+     * rejecting the detail pages we escalate the wait between products (60s,
+     * 2m, 4m, ... capped at 1h + jitter) so the crawler keeps trying through
+     * the cooldown without hammering the block page.
+     */
+    private long detailBlockBackoffMs(int consecutiveFailures) {
+        int shift = Math.min(consecutiveFailures - DETAIL_BLOCK_BACKOFF_AFTER_FAILURES, 10);
+        long jitter = (long) (Math.random() * 30_000L);
+        return Math.min((60_000L << shift) + jitter, MAX_DETAIL_BLOCK_BACKOFF_MS);
+    }
+
+    /**
+     * Interrupt-safe sleep that never throws; used so a block-backoff wait can
+     * still be interrupted when the JVM is asked to shut down.
+     */
+    private void sleepQuietly(long ms) {
+        long end = System.currentTimeMillis() + ms;
+        while (System.currentTimeMillis() < end) {
+            try {
+                Thread.sleep(Math.min(5_000L, end - System.currentTimeMillis()));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     private void closeSharedBrowser(AttractionProductDetailWorker.SharedBrowser shared) {

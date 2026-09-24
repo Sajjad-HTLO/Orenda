@@ -13,7 +13,7 @@ import java.util.Map;
 
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.restaurants.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class RestaurantListingParser {
 
     private static final String TRIPADVISOR_ORIGIN = "https://www.tripadvisor.com";

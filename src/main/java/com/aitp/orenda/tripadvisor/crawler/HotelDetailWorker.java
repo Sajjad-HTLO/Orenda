@@ -430,7 +430,7 @@ public class HotelDetailWorker {
 
     private Path ensureUserDataDir() {
         try {
-            Path dir = Path.of("data", "tripadvisor-browser-profile");
+            Path dir = Path.of(properties.browserProfileDir());
             Files.createDirectories(dir);
             return dir;
         } catch (Exception e) {

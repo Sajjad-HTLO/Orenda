@@ -6,6 +6,8 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.options.WaitUntilState;
+import com.aitp.orenda.tripadvisor.config.TripadvisorCrawlerProperties;
+import com.aitp.orenda.tripadvisor.crawler.TripadvisorListingType;
 import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -38,7 +40,7 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.attraction-products.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class AttractionProductListingWorker {
 
     private static final String TRIPADVISOR_HOMEPAGE = "https://www.tripadvisor.com/";
@@ -46,12 +48,12 @@ public class AttractionProductListingWorker {
     private static final String DATADOME_CHALLENGE_TITLE = "tripadvisor.com";
     private static final Pattern GEO_MARKER_PATTERN = Pattern.compile("-g(\\d+)-");
 
-    private final AttractionProductCrawlerProperties properties;
+    private final TripadvisorCrawlerProperties properties;
     private final AttractionProductRepository productRepository;
     private final DiskSpaceGuard diskSpaceGuard;
 
     public AttractionProductListingWorker(
-            AttractionProductCrawlerProperties properties,
+            TripadvisorCrawlerProperties properties,
             AttractionProductRepository productRepository,
             DiskSpaceGuard diskSpaceGuard) {
         this.properties = properties;
@@ -61,7 +63,7 @@ public class AttractionProductListingWorker {
 
     public AttractionProductCrawlResult crawl(String url) {
         long startedAt = System.currentTimeMillis();
-        AttractionListingType listingType = AttractionListingType.detect(url);
+        TripadvisorListingType listingType = TripadvisorListingType.detect(url);
         String linkMarker = listingType.linkMarker();
         log.info("TRIPADVISOR_ATTRACTION_PRODUCT_START url={} listingType={} linkMarker={} headless={} navigationTimeoutMs={} maxItems={} seeMoreMaxClicks={}",
                 url, listingType, linkMarker, properties.headless(), properties.navigationTimeoutMs(), properties.maxItems(), properties.seeMoreMaxClicks());
@@ -836,7 +838,7 @@ public class AttractionProductListingWorker {
 
     private Path ensureUserDataDir() {
         try {
-            Path dir = Path.of("data", "tripadvisor-browser-profile");
+            Path dir = Path.of(properties.browserProfileDir());
             Files.createDirectories(dir);
             return dir;
         } catch (Exception e) {

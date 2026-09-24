@@ -1,9 +1,12 @@
 package com.aitp.orenda.tripadvisor.attractions;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+
+import com.aitp.orenda.tripadvisor.crawler.TripadvisorListingType;
 
 import java.util.List;
 
@@ -15,14 +18,14 @@ import java.util.List;
  */
 @Slf4j
 @Repository
-@ConditionalOnProperty(name = "tripadvisor.crawler.attraction-products.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class AttractionProductRepository {
 
     private final JdbcTemplate jdbcTemplate;
     private final String subcategory;
 
     public AttractionProductRepository(JdbcTemplate jdbcTemplate,
-            @org.springframework.beans.factory.annotation.Value("${tripadvisor.crawler.attraction-products.subcategory:dinner_cruise}") String subcategory) {
+            @Value("${tripadvisor.crawler.subcategory:dinner_cruise}") String subcategory) {
         this.jdbcTemplate = jdbcTemplate;
         this.subcategory = subcategory;
     }
@@ -30,7 +33,7 @@ public class AttractionProductRepository {
     /**
      * Resolves the subcategory to persist: the category resolved from the
      * listing page heading when available, otherwise the configured
-     * {@code tripadvisor.crawler.attraction-products.subcategory}.
+     * {@code tripadvisor.crawler.subcategory}.
      */
     private String resolveSubcategory(String categoryName) {
         return (categoryName != null && !categoryName.isBlank()) ? categoryName : subcategory;
@@ -43,7 +46,7 @@ public class AttractionProductRepository {
      * {@code /Attraction_Products-...} tour listings.
      */
     private String resolveCategory(String sourceListingUrl) {
-        return AttractionListingType.detect(sourceListingUrl).poiCategory();
+        return TripadvisorListingType.detect(sourceListingUrl).poiCategory();
     }
 
     public int upsertListings(List<AttractionProductListing> listings, String categoryName) {
@@ -126,8 +129,9 @@ public class AttractionProductRepository {
 
     /**
      * Loads attraction products that have not yet had traveler reviews crawled
-     * (no rows in {@code poi_review_crawled}). Used by the "skip listing,
-     * enrich existing" mode to fetch reviews without re-crawling the listing.
+     * (no rows in {@code poi_review_crawled}) and have not been explicitly
+     * attempted before. Used by the "skip listing, enrich existing" mode to
+     * fetch reviews without re-crawling the listing.
      */
     public List<AttractionProductListing> findAttractionProductsMissingReviews() {
         return jdbcTemplate.query("""
@@ -138,6 +142,7 @@ public class AttractionProductRepository {
                 FROM poi p
                 WHERE p.osm_type = 'T'
                   AND p.category IN ('activity', 'attraction', 'restaurant')
+                  AND NOT (p.attributes ? 'reviews_attempted')
                   AND NOT EXISTS (SELECT 1 FROM poi_review_crawled r WHERE r.poi_id = p.id)
                 ORDER BY p.updated_at
                 """, (rs, rowNum) -> AttractionProductListing.builder()
@@ -146,6 +151,21 @@ public class AttractionProductRepository {
                 .url(rs.getString("url"))
                 .sourceListingUrl(rs.getString("source_listing_url"))
                 .build());
+    }
+
+    /**
+     * Marks a product as having had its reviews explicitly attempted (the
+     * primary page and the fallback review pages rendered no inline reviews).
+     * This takes it out of the missing-reviews sweep so it stops being
+     * re-crawled on every round; the flag can be cleared to retry later.
+     */
+    public void markReviewsAttempted(long tripadvisorId) {
+        jdbcTemplate.update("""
+                UPDATE poi
+                SET attributes = attributes || '{"reviews_attempted": true}'::jsonb,
+                    updated_at = NOW()
+                WHERE osm_type = 'T' AND osm_id = ?
+                """, tripadvisorId);
     }
 
     /**

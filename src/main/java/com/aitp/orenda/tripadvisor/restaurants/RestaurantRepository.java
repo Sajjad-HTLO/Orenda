@@ -9,7 +9,7 @@ import java.util.List;
 
 @Slf4j
 @Repository
-@ConditionalOnProperty(name = "tripadvisor.crawler.restaurants.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class RestaurantRepository {
 
     private final JdbcTemplate jdbcTemplate;

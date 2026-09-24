@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.attraction-products.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class AttractionProductListingParser {
 
     private static final String TRIPADVISOR_ORIGIN = "https://www.tripadvisor.com";

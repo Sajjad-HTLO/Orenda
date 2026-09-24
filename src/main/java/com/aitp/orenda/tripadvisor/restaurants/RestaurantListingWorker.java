@@ -6,6 +6,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.options.WaitUntilState;
+import com.aitp.orenda.tripadvisor.config.TripadvisorCrawlerProperties;
 import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -32,7 +33,7 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.restaurants.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class RestaurantListingWorker {
 
     private static final String TRIPADVISOR_HOMEPAGE = "https://www.tripadvisor.com/";
@@ -40,14 +41,14 @@ public class RestaurantListingWorker {
     private static final String DATADOME_MARKER = "captcha-delivery.com";
     private static final String DATADOME_CHALLENGE_TITLE = "tripadvisor.com";
 
-    private final RestaurantCrawlerProperties properties;
+    private final TripadvisorCrawlerProperties properties;
     private final RestaurantListingParser restaurantListingParser;
     private final RestaurantRepository restaurantRepository;
     private final DiskSpaceGuard diskSpaceGuard;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public RestaurantListingWorker(
-            RestaurantCrawlerProperties properties,
+            TripadvisorCrawlerProperties properties,
             RestaurantListingParser restaurantListingParser,
             RestaurantRepository restaurantRepository,
             DiskSpaceGuard diskSpaceGuard) {
@@ -510,7 +511,7 @@ public class RestaurantListingWorker {
 
     private Path ensureUserDataDir() {
         try {
-            Path dir = Path.of("data", "tripadvisor-browser-profile");
+            Path dir = Path.of(properties.browserProfileDir());
             Files.createDirectories(dir);
             return dir;
         } catch (Exception e) {

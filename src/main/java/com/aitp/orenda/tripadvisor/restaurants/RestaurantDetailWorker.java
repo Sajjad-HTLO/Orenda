@@ -5,6 +5,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.options.WaitUntilState;
+import com.aitp.orenda.tripadvisor.config.TripadvisorCrawlerProperties;
 import com.aitp.orenda.tripadvisor.image.ImageSaver;
 import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import lombok.extern.slf4j.Slf4j;
@@ -26,21 +27,21 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.restaurants.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class RestaurantDetailWorker {
 
     private static final String TRIPADVISOR_HOMEPAGE = "https://www.tripadvisor.com/";
     private static final String DATADOME_MARKER = "captcha-delivery.com";
     private static final String DATADOME_CHALLENGE_TITLE = "tripadvisor.com";
 
-    private final RestaurantCrawlerProperties properties;
+    private final TripadvisorCrawlerProperties properties;
     private final RestaurantDetailParser restaurantDetailParser;
     private final RestaurantRepository restaurantRepository;
     private final ImageSaver imageSaver;
     private final DiskSpaceGuard diskSpaceGuard;
 
     public RestaurantDetailWorker(
-            RestaurantCrawlerProperties properties,
+            TripadvisorCrawlerProperties properties,
             RestaurantDetailParser restaurantDetailParser,
             RestaurantRepository restaurantRepository,
             ImageSaver imageSaver,
@@ -412,7 +413,7 @@ public class RestaurantDetailWorker {
 
     private Path ensureUserDataDir() {
         try {
-            Path dir = Path.of("data", "tripadvisor-browser-profile");
+            Path dir = Path.of(properties.browserProfileDir());
             Files.createDirectories(dir);
             return dir;
         } catch (Exception e) {

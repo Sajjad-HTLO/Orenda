@@ -1,6 +1,9 @@
 package com.aitp.orenda.tripadvisor.restaurants;
 
 import lombok.extern.slf4j.Slf4j;
+import com.aitp.orenda.tripadvisor.config.TripadvisorCrawlerProperties;
+import com.aitp.orenda.tripadvisor.crawler.CrawlerPropertiesFileUpdater;
+import com.aitp.orenda.tripadvisor.crawler.TripadvisorPaginationGenerator;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
@@ -15,25 +18,25 @@ import java.util.concurrent.Semaphore;
 
 @Slf4j
 @Service
-@ConditionalOnProperty(name = "tripadvisor.crawler.restaurants.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class RestaurantCrawlerManager {
 
-    private final RestaurantCrawlerProperties properties;
-    private final RestaurantPaginationGenerator paginationGenerator;
+    private final TripadvisorCrawlerProperties properties;
+    private final TripadvisorPaginationGenerator paginationGenerator;
     private final RestaurantListingWorker listingWorker;
     private final RestaurantDetailWorker detailWorker;
     private final RestaurantRepository restaurantRepository;
-    private final RestaurantPropertiesFileUpdater propertiesFileUpdater;
+    private final CrawlerPropertiesFileUpdater propertiesFileUpdater;
 
     private final Set<String> processedRestaurantUrls = ConcurrentHashMap.newKeySet();
 
     public RestaurantCrawlerManager(
-            RestaurantCrawlerProperties properties,
-            RestaurantPaginationGenerator paginationGenerator,
+            TripadvisorCrawlerProperties properties,
+            TripadvisorPaginationGenerator paginationGenerator,
             RestaurantListingWorker listingWorker,
             RestaurantDetailWorker detailWorker,
             RestaurantRepository restaurantRepository,
-            RestaurantPropertiesFileUpdater propertiesFileUpdater) {
+            CrawlerPropertiesFileUpdater propertiesFileUpdater) {
         this.properties = properties;
         this.paginationGenerator = paginationGenerator;
         this.listingWorker = listingWorker;
@@ -85,7 +88,13 @@ public class RestaurantCrawlerManager {
             log.info("Tripadvisor restaurant listing page completed. offset={}, url={}, restaurants={}",
                     offset, url, listingResult.restaurantCount());
 
-            int pageDetailed = crawlRestaurantDetails(listingResult.restaurants());
+            int pageDetailed = 0;
+            if (properties.detailsEnabled()) {
+                pageDetailed = crawlRestaurantDetails(listingResult.restaurants());
+            } else {
+                log.info("Tripadvisor restaurant detail stage skipped (details-enabled=false). offset={}, url={}, restaurants={}",
+                        offset, url, listingResult.restaurants().size());
+            }
             detailedRestaurants += pageDetailed;
 
             if (listingResult.restaurants().isEmpty()) {

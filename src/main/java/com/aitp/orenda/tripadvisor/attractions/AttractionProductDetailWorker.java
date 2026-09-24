@@ -5,6 +5,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.options.WaitUntilState;
+import com.aitp.orenda.tripadvisor.config.TripadvisorCrawlerProperties;
 import com.aitp.orenda.tripadvisor.image.ImageSaver;
 import com.aitp.orenda.tripadvisor.util.DiskSpaceGuard;
 import lombok.extern.slf4j.Slf4j;
@@ -25,15 +26,18 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "tripadvisor.crawler.attraction-products.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "tripadvisor.crawler.enabled", havingValue = "true")
 public class AttractionProductDetailWorker {
 
     private static final String TRIPADVISOR_HOMEPAGE = "https://www.tripadvisor.com/";
     private static final String PRODUCT_LINK_MARKER = "AttractionProductReview-";
     private static final String DATADOME_MARKER = "captcha-delivery.com";
     private static final String DATADOME_CHALLENGE_TITLE = "tripadvisor.com";
+    private static final long DEBUG_SNAPSHOT_MAX_BYTES = 150_000_000L;
+    private static final java.util.regex.Pattern REVIEW_URL_PATTERN = java.util.regex.Pattern.compile(
+            "(https://www\\.tripadvisor\\.com/)(AttractionProductReview|Attraction_Review|Attraction_Products)-(g\\d+)-(d\\d+)-(.+)\\.html");
 
-    private final AttractionProductCrawlerProperties properties;
+    private final TripadvisorCrawlerProperties properties;
     private final AttractionProductDetailParser detailParser;
     private final AttractionProductReviewParser reviewParser;
     private final AttractionProductRepository productRepository;
@@ -42,7 +46,7 @@ public class AttractionProductDetailWorker {
     private final DiskSpaceGuard diskSpaceGuard;
 
     public AttractionProductDetailWorker(
-            AttractionProductCrawlerProperties properties,
+            TripadvisorCrawlerProperties properties,
             AttractionProductDetailParser detailParser,
             AttractionProductReviewParser reviewParser,
             AttractionProductRepository productRepository,
@@ -214,7 +218,7 @@ public class AttractionProductDetailWorker {
             log.info("TRIPADVISOR_ATTRACTION_PRODUCT_DETAIL_PERSISTED tripadvisorId={} url={} affectedRows={} elapsedMs={}",
                     detail.tripadvisorId(), detail.url(), persistedRows, elapsedMs(startedAt));
 
-            persistReviews(listing, html);
+            persistReviews(listing, html, page);
 
             int imagesStored = 0;
             if (alreadyHasImages) {
@@ -304,15 +308,38 @@ public class AttractionProductDetailWorker {
 
     /**
      * Parses the rendered product page for traveler reviews and persists them
-     * (with any per-aspect sub-ratings) against the POI. Failures are non-fatal
-     * so review crawling never aborts the detail/image stage.
+     * (with any per-aspect sub-ratings) against the POI. When the first parse
+     * yields nothing, the equivalent {@code Attraction_Products-} page and then
+     * the server-rendered {@code ShowUserReviews-} page are tried before giving
+     * up. Failures are non-fatal so review crawling never aborts the
+     * detail/image stage.
      */
-    private void persistReviews(AttractionProductListing listing, String html) {
+    private void persistReviews(AttractionProductListing listing, String html, Page page) {
         try {
-            java.util.List<CrawledPoiReview> reviews = reviewParser.parse(html, listing.url(), properties.maxReviewsPerPoi());
-            if (reviews.isEmpty()) {
+            java.util.List<CrawledPoiReview> reviews = safeParseReviews(html, listing.url());
+            if ((reviews == null || reviews.isEmpty()) && page != null) {
+                for (String candidate : reviewFallbackUrls(listing.url())) {
+                    if (candidate == null) {
+                        continue;
+                    }
+                    ReviewPageAttempt attempt = fetchAndParseReviewPage(listing, page, candidate);
+                    if (attempt.blocked) {
+                        log.info("TRIPADVISOR_ATTRACTION_PRODUCT_REVIEWS_BLOCKED tripadvisorId={} url={} candidate={}",
+                                listing.tripadvisorId(), listing.url(), candidate);
+                        return;
+                    }
+                    if (attempt.reviews != null && !attempt.reviews.isEmpty()) {
+                        reviews = attempt.reviews;
+                        break;
+                    }
+                }
+            }
+            if (reviews == null || reviews.isEmpty()) {
                 log.info("TRIPADVISOR_ATTRACTION_PRODUCT_REVIEWS_NONE tripadvisorId={} url={}",
                         listing.tripadvisorId(), listing.url());
+                // A real attempt found no inline reviews; mark the product so the
+                // sweep stops re-crawling it forever (re-enable by clearing the flag).
+                productRepository.markReviewsAttempted(listing.tripadvisorId());
                 return;
             }
             java.util.UUID poiId = productRepository.findPoiIdByTripadvisorId(listing.tripadvisorId());
@@ -328,6 +355,97 @@ public class AttractionProductDetailWorker {
             log.warn("TRIPADVISOR_ATTRACTION_PRODUCT_REVIEWS_FAILED tripadvisorId={} url={} error={}",
                     listing.tripadvisorId(), listing.url(), e.getMessage());
         }
+    }
+
+    /**
+     * Holds the outcome of one review-page fallback attempt: either the parsed
+     * reviews (empty when the page rendered no inline reviews), or a flag saying
+     * the page was DataDome-blocked and must be retried on a later round.
+     */
+    private static final class ReviewPageAttempt {
+        private final java.util.List<CrawledPoiReview> reviews;
+        private final boolean blocked;
+
+        ReviewPageAttempt(java.util.List<CrawledPoiReview> reviews, boolean blocked) {
+            this.reviews = reviews;
+            this.blocked = blocked;
+        }
+    }
+
+    /**
+     * Navigates to a candidate review page and parses it. Returns the parsed
+     * reviews (possibly empty when the page rendered none), or an attempt
+     * flagged as blocked when DataDome intercepted the page.
+     */
+    private ReviewPageAttempt fetchAndParseReviewPage(AttractionProductListing listing, Page page, String reviewsUrl) {
+        try {
+            log.info("TRIPADVISOR_ATTRACTION_PRODUCT_REVIEWS_PAGE_NAVIGATE tripadvisorId={} url={} reviewsUrl={}",
+                    listing.tripadvisorId(), listing.url(), reviewsUrl);
+            page.navigate(reviewsUrl, new Page.NavigateOptions()
+                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(properties.navigationTimeoutMs()));
+            boolean contentReady = waitForRealContent(page, listing, "REVIEWS_FALLBACK");
+            performHumanBehavior(page);
+            if (contentReady) {
+                try {
+                    Thread.sleep(1500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            String html = page.content();
+            String title = page.title();
+            if (isDataDomeChallenge(html, title)) {
+                return new ReviewPageAttempt(null, true);
+            }
+            java.util.List<CrawledPoiReview> reviews = safeParseReviews(html, reviewsUrl);
+            log.info("TRIPADVISOR_ATTRACTION_PRODUCT_REVIEWS_PAGE_FALLBACK tripadvisorId={} url={} reviewsUrl={} extractedReviews={}",
+                    listing.tripadvisorId(), listing.url(), reviewsUrl,
+                    reviews == null ? 0 : reviews.size());
+            return new ReviewPageAttempt(reviews, false);
+        } catch (Exception e) {
+            log.warn("TRIPADVISOR_ATTRACTION_PRODUCT_REVIEWS_PAGE_ERROR tripadvisorId={} url={} reviewsUrl={} error={}",
+                    listing.tripadvisorId(), listing.url(), reviewsUrl, e.getMessage());
+            return new ReviewPageAttempt(null, false);
+        }
+    }
+
+    /**
+     * Parses reviews from the given HTML, swallowing parser errors so they can
+     * be treated as "no reviews found at this stage" and trigger the fallback.
+     */
+    private java.util.List<CrawledPoiReview> safeParseReviews(String html, String sourceUrl) {
+        try {
+            return reviewParser.parse(html, sourceUrl, properties.maxReviewsPerPoi());
+        } catch (Exception e) {
+            log.warn("TRIPADVISOR_ATTRACTION_PRODUCT_REVIEWS_PARSE_ERROR tripadvisorId={} url={} error={}",
+                    sourceUrl, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Candidate review pages to try when the primary product page shows no
+     * inline review cards: first the equivalent bookable-product page
+     * ({@code Attraction_Products-}), then the classic server-rendered
+     * {@code ShowUserReviews-} review list.
+     */
+    private java.util.List<String> reviewFallbackUrls(String productUrl) {
+        java.util.List<String> urls = new java.util.ArrayList<>();
+        if (productUrl == null) {
+            return urls;
+        }
+        java.util.regex.Matcher matcher = REVIEW_URL_PATTERN.matcher(productUrl);
+        if (!matcher.find()) {
+            return urls;
+        }
+        String domain = matcher.group(1);
+        String geo = matcher.group(3);
+        String id = matcher.group(4);
+        String slug = matcher.group(5);
+        urls.add(domain + "Attraction_Products-" + geo + "-" + id + "-" + slug + ".html");
+        urls.add(domain + "ShowUserReviews-" + geo + "-" + id + "-r0-" + slug + ".html");
+        return urls;
     }
 
     // ==================== DataDome handling ====================
@@ -517,15 +635,52 @@ public class AttractionProductDetailWorker {
 
     private String saveHtmlSnapshot(AttractionProductListing listing, String html) {
         try {
-            Files.createDirectories(Path.of("data", "tripadvisor-debug", "attraction-products"));
-            Path path = Path.of("data", "tripadvisor-debug", "attraction-products",
-                    "product-" + listing.tripadvisorId() + ".html");
+            Path dir = Path.of("data", "tripadvisor-debug", "attraction-products");
+            Files.createDirectories(dir);
+            Path path = dir.resolve("product-" + listing.tripadvisorId() + ".html");
             Files.writeString(path, html == null ? "" : html, StandardCharsets.UTF_8);
+            pruneHtmlSnapshots(dir);
             return path.toString();
         } catch (Exception e) {
             log.warn("Failed to save Tripadvisor attraction product detail HTML snapshot. tripadvisorId={}, error={}",
                     listing.tripadvisorId(), e.getMessage());
             return "<not-saved>";
+        }
+    }
+
+    private void pruneHtmlSnapshots(Path dir) {
+        java.util.List<Path> files = new java.util.ArrayList<>();
+        try (java.util.stream.Stream<Path> stream = Files.list(dir)) {
+            stream.forEach(files::add);
+        } catch (Exception e) {
+            return;
+        }
+        files.sort(java.util.Comparator.comparingLong(p -> {
+            try {
+                return Files.getLastModifiedTime(p).toMillis();
+            } catch (Exception e) {
+                return 0L;
+            }
+        }));
+        long total = 0;
+        for (Path f : files) {
+            try {
+                total += Files.size(f);
+            } catch (Exception e) {
+                // ignore unreadable file
+            }
+        }
+        for (Path f : files) {
+            if (total <= DEBUG_SNAPSHOT_MAX_BYTES) {
+                break;
+            }
+            try {
+                long size = Files.size(f);
+                Files.deleteIfExists(f);
+                total -= size;
+            } catch (Exception e) {
+                log.debug("Failed to prune HTML snapshot {}: {}", f, e.getMessage());
+            }
         }
     }
 
@@ -535,7 +690,7 @@ public class AttractionProductDetailWorker {
 
     private Path ensureUserDataDir() {
         try {
-            Path dir = Path.of("data", "tripadvisor-browser-profile");
+            Path dir = Path.of(properties.browserProfileDir());
             Files.createDirectories(dir);
             return dir;
         } catch (Exception e) {

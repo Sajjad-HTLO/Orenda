@@ -25,7 +25,7 @@ import java.util.concurrent.Semaphore;
 public class CrawlManager {
 
     private final TripadvisorCrawlerProperties properties;
-    private final PaginationGenerator paginationGenerator;
+    private final TripadvisorPaginationGenerator paginationGenerator;
     private final ListingWorker listingWorker;
     private final HotelDetailWorker hotelDetailWorker;
     private final HotelRepository hotelRepository;
@@ -45,7 +45,7 @@ public class CrawlManager {
 
     public CrawlManager(
             TripadvisorCrawlerProperties properties,
-            PaginationGenerator paginationGenerator,
+            TripadvisorPaginationGenerator paginationGenerator,
             ListingWorker listingWorker,
             HotelDetailWorker hotelDetailWorker,
             HotelRepository hotelRepository,
@@ -83,7 +83,8 @@ public class CrawlManager {
                 properties.maxEmptyPages(), properties.singlePageOnly());
 
         while (consecutiveEmptyPages < properties.maxEmptyPages()) {
-            CrawlPage page = paginationGenerator.pageForOffset(offset);
+            String pageUrl = paginationGenerator.pageUrlForOffset(offset);
+            CrawlPage page = CrawlPage.builder().offset(offset).url(pageUrl).build();
             submittedPages++;
 
             log.info("Tripadvisor listing page starting. offset={}, url={}", page.offset(), page.url());
@@ -115,7 +116,13 @@ public class CrawlManager {
                     page.offset(), page.url(), pageHotels.size());
 
             // Fully crawl every hotel detail on this page before moving on.
-            int pageDetailed = crawlHotelDetails(pageHotels);
+            int pageDetailed = 0;
+            if (properties.detailsEnabled()) {
+                pageDetailed = crawlHotelDetails(pageHotels);
+            } else {
+                log.info("Tripadvisor hotel detail stage skipped (details-enabled=false). offset={}, url={}, hotels={}",
+                        page.offset(), page.url(), pageHotels.size());
+            }
             detailedHotels += pageDetailed;
 
             if (pageHotels.isEmpty()) {
@@ -257,8 +264,8 @@ public class CrawlManager {
      * where this run left off. Non-fatal: failures are logged and swallowed.
      */
     private void persistNextPageUrl(int nextOffset) {
-        CrawlPage nextPage = paginationGenerator.pageForOffset(nextOffset);
-        propertiesFileUpdater.updateBaseUrl(nextPage.url());
+        String nextUrl = paginationGenerator.pageUrlForOffset(nextOffset);
+        propertiesFileUpdater.updateBaseUrl(nextUrl);
     }
 
     /**
